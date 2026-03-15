@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Audio files (large binaries)
+tracks/
+*.mp3
+*.flac
+*.wav
+*.ogg
+*.m4a
+*.aac
+*.opus
+
+# Project state (user-specific)
+project.json
+project.xml
+
+# Screenshots (generated)
+screenshot*.svg
+screenshot*.png
