@@ -15,6 +15,9 @@ from textual.widgets import Header, Footer, Static, TabbedContent, TabPane
 from textual.timer import Timer
 from textual.worker import Worker, WorkerState
 
+import subprocess
+import sys
+
 from pymixter.core.project import Project, find_audio_files, parse_time
 from pymixter.core.analysis import analyze_track
 from pymixter.core.automix import automix
@@ -53,6 +56,25 @@ FOREST_THEME = Theme(
 def _fmt_time(seconds: float) -> str:
     m, s = divmod(int(seconds), 60)
     return f"{m}:{s:02d}"
+
+
+def _subprocess_analyze(path: str) -> dict:
+    """Run analyze_track in a subprocess to avoid GIL blocking the UI."""
+    script = (
+        "import json, sys; "
+        "from pymixter.core.analysis import analyze_track; "
+        "r = analyze_track(sys.argv[1], full=True); "
+        "json.dump(r, sys.stdout, default=str)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, path],
+        capture_output=True, text=True, timeout=300,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip().splitlines()
+        msg = stderr[-1] if stderr else "Unknown analysis error"
+        raise RuntimeError(msg)
+    return json.loads(result.stdout)
 
 
 class MixApp(App):
@@ -583,7 +605,7 @@ class MixApp(App):
                         name="scan", exclusive=True, group="scan")
 
     def _analyze_track(self, idx: int):
-        """Run track analysis in background worker."""
+        """Run track analysis in background subprocess (avoids GIL freeze)."""
         if idx >= len(self.project.library):
             self._set_status(f"Track index {idx} out of range")
             return
@@ -593,7 +615,7 @@ class MixApp(App):
         self._set_status(f"Analyzing {track.title}...")
 
         def _do_analyze():
-            return idx, analyze_track(track.path, full=True)
+            return idx, _subprocess_analyze(track.path)
 
         self.run_worker(_do_analyze, thread=True, exit_on_error=False,
                         name="analyze", exclusive=True, group="analyze")
