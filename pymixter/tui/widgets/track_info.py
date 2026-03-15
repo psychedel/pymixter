@@ -46,7 +46,13 @@ class TrackInfo(Static):
             lines.append(f"{ci_m}:{ci_s:02d} → {co_m}:{co_s:02d}\n",
                          style="bold #7a8a50")
 
-        if t.energy:
+        if t.waveform:
+            lines.append("\n")
+            wf_width = 60
+            wf_text = _render_waveform(t.waveform, wf_width, t.cue_in, t.cue_out, t.duration)
+            lines.append_text(wf_text)
+            lines.append("\n\n")
+        elif t.energy:
             lines.append("Energy:   ", style="dim")
             blocks = "".join(_energy_char(e) for e in t.energy)
             lines.append(blocks + "\n", style="#c8a848")
@@ -66,3 +72,54 @@ def _energy_char(val: float) -> str:
     bars = " _.-:=+*#@"
     idx = min(int(val * (len(bars) - 1)), len(bars) - 1)
     return bars[idx]
+
+
+_BLOCKS = " \u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
+
+
+def _render_waveform(waveform: list[float], width: int,
+                     cue_in: float | None = None,
+                     cue_out: float | None = None,
+                     duration: float = 0) -> Text:
+    """Render waveform as unicode block characters with color gradient."""
+    if not waveform:
+        return Text("")
+
+    # Resample to width
+    n = len(waveform)
+    resampled = []
+    for i in range(width):
+        src_start = int(i * n / width)
+        src_end = max(src_start + 1, int((i + 1) * n / width))
+        chunk = waveform[src_start:src_end]
+        resampled.append(max(chunk) if chunk else 0.0)
+
+    # Normalize
+    peak = max(resampled) if resampled else 1.0
+    if peak > 0:
+        resampled = [v / peak for v in resampled]
+
+    # Cue positions mapped to width
+    cue_in_col = int(cue_in / duration * width) if cue_in and duration else 0
+    cue_out_col = int(cue_out / duration * width) if cue_out and duration else width
+
+    text = Text()
+    for i, val in enumerate(resampled):
+        idx = min(int(val * (len(_BLOCKS) - 1)), len(_BLOCKS) - 1)
+        char = _BLOCKS[idx]
+
+        # Color by amplitude: green < yellow < red
+        if val < 0.4:
+            color = "#7a8a50"
+        elif val < 0.7:
+            color = "#c8a848"
+        else:
+            color = "#c87848"
+
+        # Dim outside cue region
+        if i < cue_in_col or i >= cue_out_col:
+            color = "#4a4d4a"
+
+        text.append(char, style=color)
+
+    return text

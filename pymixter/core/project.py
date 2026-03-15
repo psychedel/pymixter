@@ -27,6 +27,7 @@ class Track:
     cue_in: float | None = None  # musically meaningful start point
     cue_out: float | None = None  # musically meaningful end point
     energy: list[float] = field(default_factory=list)  # normalized RMS profile
+    waveform: list[float] = field(default_factory=list)  # peak envelope for display
     stems: dict[str, str] = field(default_factory=dict)  # stem_name -> path
 
     def __post_init__(self):
@@ -52,6 +53,8 @@ class Transition:
     to_track: int
     type: Literal["crossfade", "eq_fade", "cut", "echo_out"] = "crossfade"
     length_bars: int = 16
+    tempo_sync: bool = True
+    beat_aligned: bool = True
     eq_curves: dict[str, list[float]] = field(default_factory=dict)
 
 
@@ -121,6 +124,44 @@ class Project:
         if track_index < 0 or track_index >= len(self.library):
             raise IndexError(f"Track index {track_index} out of range")
         self.timeline.append(track_index)
+
+    def move_timeline_track(self, from_pos: int, to_pos: int):
+        """Move a track in the timeline from one position to another."""
+        if from_pos < 0 or from_pos >= len(self.timeline):
+            raise IndexError(f"Position {from_pos} out of range")
+        to_pos = max(0, min(to_pos, len(self.timeline) - 1))
+        if from_pos == to_pos:
+            return
+        item = self.timeline.pop(from_pos)
+        self.timeline.insert(to_pos, item)
+        self._rebuild_transitions()
+
+    def remove_from_timeline(self, pos: int):
+        """Remove a track from the timeline by position."""
+        if pos < 0 or pos >= len(self.timeline):
+            raise IndexError(f"Position {pos} out of range")
+        self.timeline.pop(pos)
+        self._rebuild_transitions()
+
+    def _rebuild_transitions(self):
+        """Remove transitions that reference invalid positions."""
+        max_pos = len(self.timeline) - 1
+        self.transitions = [
+            t for t in self.transitions
+            if t.from_track < max_pos and t.to_track <= max_pos
+        ]
+
+    def set_transition(self, from_pos: int, tr_type: str = "crossfade",
+                       length_bars: int = 16, **kwargs) -> Transition:
+        """Set or update transition between timeline positions."""
+        if from_pos < 0 or from_pos >= len(self.timeline) - 1:
+            raise IndexError(f"No transition possible at position {from_pos}")
+        # Remove existing transition at this position
+        self.transitions = [t for t in self.transitions if t.from_track != from_pos]
+        t = Transition(from_track=from_pos, to_track=from_pos + 1,
+                       type=tr_type, length_bars=length_bars, **kwargs)
+        self.transitions.append(t)
+        return t
 
     def add_transition(self, from_idx: int, to_idx: int, **kwargs) -> Transition:
         t = Transition(from_track=from_idx, to_track=to_idx, **kwargs)

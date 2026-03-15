@@ -19,6 +19,7 @@ from pymixter.core.automix import automix
 from pymixter.core.player import Player, PlayerState
 from pymixter.core.recent import get_recent, add_recent
 from pymixter.core.mixer import render_timeline, render_to_file, validate_timeline
+from pymixter.core.history import History
 from pymixter.tui.widgets.library import LibraryTable
 from pymixter.tui.widgets.timeline import TimelineView
 from pymixter.tui.widgets.track_info import TrackInfo
@@ -81,6 +82,8 @@ class MixApp(App):
         Binding("r", "reload_project", "Reload", show=False),
         Binding("s", "save_project", "Save", show=False),
         Binding("l", "open_recent", "Recent", show=False),
+        Binding("u", "undo", "Undo", show=False),
+        Binding("ctrl+r", "redo", "Redo", show=False),
         Binding("1", "tab_library", "Library", show=False),
         Binding("2", "tab_timeline", "Timeline", show=False),
         Binding("3", "tab_info", "Info", show=False),
@@ -97,6 +100,7 @@ class MixApp(App):
         self._position_timer: Timer | None = None
         self._last_status: str = ""
         self.player = Player()
+        self.history = History()
         self._load_project()
 
     def _load_project(self):
@@ -108,8 +112,10 @@ class MixApp(App):
             self.project.save()
         add_recent(self.project_path)
 
-    def _save_and_sync(self):
+    def _save_and_sync(self, description: str = ""):
         """Save project and update version tracker."""
+        if description:
+            self.history.checkpoint(self.project, description)
         self.project.save()
         self._last_version = self.project.get_version()
         self._refresh_all()
@@ -244,7 +250,7 @@ class MixApp(App):
 
         dispatch = {
             "help": lambda: self._set_status(
-                "add scan analyze automix render validate playmix export import open save quit"
+                "add scan analyze automix timeline transition cue eq gain render validate playmix export import undo redo"
             ),
             "save": lambda: self.action_save_project(),
             "suggest": lambda: self._show_suggestions(),
@@ -282,13 +288,24 @@ class MixApp(App):
                 self._analyze_track(idx)
             else:
                 self._set_status("Usage: analyze [index]")
-        elif verb == "timeline" and len(args) >= 2 and args[0] == "append":
+        elif verb == "timeline":
+            self._handle_timeline_cmd(args)
+        elif verb == "transition":
+            self._handle_transition_cmd(args)
+        elif verb == "cue":
+            self._handle_cue_cmd(args)
+        elif verb == "eq":
+            self._handle_eq_cmd(args)
+        elif verb == "gain" and args:
             try:
-                self.project.append_to_timeline(int(args[1]))
-                self._save_and_sync()
-                self._set_status(f"Added [{args[1]}] to timeline")
-            except (ValueError, IndexError) as e:
-                self._set_status(f"Error: {e}")
+                self.player.deck_a.gain.gain_db = float(args[0])
+                self._set_status(f"Gain: {args[0]} dB")
+            except ValueError:
+                self._set_status("Usage: gain <dB>")
+        elif verb == "undo":
+            self.action_undo()
+        elif verb == "redo":
+            self.action_redo()
         elif verb == "render":
             self._render_mix(args)
         elif verb == "validate":
@@ -324,7 +341,7 @@ class MixApp(App):
     def _import_file(self, path: str):
         try:
             track = self.project.import_track(path)
-            self._save_and_sync()
+            self._save_and_sync("Import track")
             self._set_status(f"Imported: {track.title}")
             self._switch_tab("tab-library")
         except FileNotFoundError:
@@ -339,7 +356,7 @@ class MixApp(App):
             return
         for f in files:
             self.project.import_track(str(f))
-        self._save_and_sync()
+        self._save_and_sync("Scan directory")
         self._set_status(f"Imported {len(files)} tracks from {Path(directory).name}/")
         self._switch_tab("tab-library")
 
@@ -351,7 +368,6 @@ class MixApp(App):
         self._set_status(f"Analyzing {track.title}...")
         try:
             analysis = analyze_track(track.path, full=True)
-            analysis.pop("_waveform", None)
             track.bpm = analysis.get("bpm")
             track.key = analysis.get("key")
             track.duration = analysis.get("duration", 0)
@@ -359,7 +375,8 @@ class MixApp(App):
             track.cue_in = analysis.get("cue_in")
             track.cue_out = analysis.get("cue_out")
             track.energy = analysis.get("energy", [])
-            self._save_and_sync()
+            track.waveform = analysis.get("_waveform", [])
+            self._save_and_sync("Analyze track")
             bars = track.bars
             self._set_status(
                 f"Analyzed: {track.title} — {track.bpm} BPM, {track.key}, {bars} bars"
@@ -387,7 +404,7 @@ class MixApp(App):
         if not order:
             self._set_status("No analyzed tracks — run analyze first")
             return
-        self._save_and_sync()
+        self._save_and_sync("Automix")
         self._switch_tab("tab-timeline")
         n_tr = len(self.project.transitions)
         self._set_status(
@@ -469,7 +486,7 @@ class MixApp(App):
             before = len(self.project.library)
             import_rekordbox_xml(path, self.project)
             added = len(self.project.library) - before
-            self._save_and_sync()
+            self._save_and_sync("Import XML")
             self._set_status(f"Imported {added} tracks from XML")
         except Exception as e:
             self._set_status(f"Import error: {e}")
@@ -480,7 +497,7 @@ class MixApp(App):
                 from pymixter.core.rekordbox_xml import import_rekordbox_xml
                 self.project = import_rekordbox_xml(path)
                 self.project._path = self.project_path
-                self._save_and_sync()
+                self._save_and_sync("Open XML")
                 self._set_status(
                     f"Opened XML: {len(self.project.library)} tracks"
                 )
@@ -555,12 +572,140 @@ class MixApp(App):
         except Exception as e:
             self._set_status(f"Mix playback error: {e}")
 
+    # ── Timeline commands ──────────────────────────────────────
+
+    def _handle_timeline_cmd(self, args: list[str]):
+        """Handle :timeline subcommands."""
+        if not args:
+            self._set_status("timeline: append|move|remove|show")
+            return
+        sub = args[0]
+        if sub == "append" and len(args) >= 2:
+            try:
+                self.project.append_to_timeline(int(args[1]))
+                self._save_and_sync("Add to timeline")
+                self._set_status(f"Added [{args[1]}] to timeline")
+            except (ValueError, IndexError) as e:
+                self._set_status(f"Error: {e}")
+        elif sub == "move" and len(args) >= 3:
+            try:
+                self.project.move_timeline_track(int(args[1]), int(args[2]))
+                self._save_and_sync("Move timeline track")
+                self._set_status(f"Moved {args[1]} -> {args[2]}")
+            except (ValueError, IndexError) as e:
+                self._set_status(f"Error: {e}")
+        elif sub == "remove" and len(args) >= 2:
+            try:
+                self.project.remove_from_timeline(int(args[1]))
+                self._save_and_sync("Remove from timeline")
+                self._set_status(f"Removed position {args[1]}")
+            except (ValueError, IndexError) as e:
+                self._set_status(f"Error: {e}")
+        elif sub == "show":
+            if not self.project.timeline:
+                self._set_status("Timeline empty")
+            else:
+                names = [self.project.library[i].title[:15]
+                         for i in self.project.timeline]
+                self._set_status(" > ".join(names))
+        else:
+            self._set_status("timeline: append|move|remove|show")
+
+    # ── Transition commands ──────────────────────────────────
+
+    def _handle_transition_cmd(self, args: list[str]):
+        """Handle :transition subcommands."""
+        if not args:
+            self._set_status("transition: edit|list|remove")
+            return
+        sub = args[0]
+        if sub == "edit" and len(args) >= 2:
+            try:
+                pos = int(args[1])
+                tr_type = args[2] if len(args) > 2 else "crossfade"
+                bars = int(args[3]) if len(args) > 3 else 16
+                self.project.set_transition(pos, tr_type, bars)
+                self._save_and_sync("Edit transition")
+                self._set_status(f"Transition [{pos}]: {tr_type} {bars}b")
+            except (ValueError, IndexError) as e:
+                self._set_status(f"Error: {e}")
+        elif sub == "list":
+            if not self.project.transitions:
+                self._set_status("No transitions")
+            else:
+                parts = [f"[{t.from_track}] {t.type} {t.length_bars}b"
+                         for t in self.project.transitions]
+                self._set_status(" | ".join(parts))
+        elif sub == "remove" and len(args) >= 2:
+            try:
+                pos = int(args[1])
+                self.project.transitions = [
+                    t for t in self.project.transitions if t.from_track != pos
+                ]
+                self._save_and_sync("Remove transition")
+                self._set_status(f"Removed transition at [{pos}]")
+            except ValueError:
+                self._set_status("Usage: transition remove <pos>")
+        else:
+            self._set_status("transition: edit <pos> [type] [bars] | list | remove <pos>")
+
+    # ── Cue point commands ──────────────────────────────────
+
+    def _handle_cue_cmd(self, args: list[str]):
+        """Handle :cue in/out commands for selected track."""
+        if self._selected_track_idx is None:
+            self._set_status("Select a track first")
+            return
+        if len(args) < 2:
+            self._set_status("cue: in <sec> | out <sec>")
+            return
+        track = self.project.library[self._selected_track_idx]
+        try:
+            val = float(args[1])
+            if args[0] == "in":
+                track.cue_in = val
+                self._save_and_sync("Set cue in")
+                self._set_status(f"Cue in: {_fmt_time(val)}")
+            elif args[0] == "out":
+                track.cue_out = val
+                self._save_and_sync("Set cue out")
+                self._set_status(f"Cue out: {_fmt_time(val)}")
+            else:
+                self._set_status("cue: in <sec> | out <sec>")
+        except ValueError:
+            self._set_status("Usage: cue in|out <seconds>")
+
+    # ── EQ commands ──────────────────────────────────────────
+
+    def _handle_eq_cmd(self, args: list[str]):
+        """Handle :eq low/mid/high/reset commands."""
+        if not args:
+            lo = self.player.deck_a.eq.low.gain_db
+            mi = self.player.deck_a.eq.mid.gain_db
+            hi = self.player.deck_a.eq.high.gain_db
+            self._set_status(f"EQ: lo={lo:+.0f} mid={mi:+.0f} hi={hi:+.0f}")
+            return
+        sub = args[0]
+        if sub == "reset":
+            self.player.deck_a.eq.reset()
+            self._set_status("EQ reset to 0/0/0")
+        elif sub in ("low", "mid", "high") and len(args) >= 2:
+            try:
+                db = float(args[1])
+                db = max(-12, min(12, db))
+                getattr(self.player.deck_a.eq, f"set_{sub}")(db)
+                self._set_status(f"EQ {sub}: {db:+.0f} dB")
+            except ValueError:
+                self._set_status(f"Usage: eq {sub} <dB>")
+        else:
+            self._set_status("eq: low|mid|high <dB> | reset")
+
     def action_add_to_timeline(self):
         if self._selected_track_idx is None:
             self._set_status("No track selected")
             return
         self.project.append_to_timeline(self._selected_track_idx)
-        self._save_and_sync()
+        self._save_and_sync("Add to timeline")
         self._set_status(f"Added track [{self._selected_track_idx}] to timeline")
 
     def action_reload_project(self):
@@ -572,6 +717,26 @@ class MixApp(App):
     def action_save_project(self):
         self._save_and_sync()
         self._set_status("Project saved")
+
+    def action_undo(self):
+        desc = self.history.undo(self.project)
+        if desc:
+            self.project.save()
+            self._last_version = self.project.get_version()
+            self._refresh_all()
+            self._set_status(f"Undo: {desc}")
+        else:
+            self._set_status("Nothing to undo")
+
+    def action_redo(self):
+        desc = self.history.redo(self.project)
+        if desc:
+            self.project.save()
+            self._last_version = self.project.get_version()
+            self._refresh_all()
+            self._set_status(f"Redo: {desc}")
+        else:
+            self._set_status("Nothing to redo")
 
     def action_tab_library(self):
         self._switch_tab("tab-library")

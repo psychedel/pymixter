@@ -58,7 +58,6 @@ def cmd_add(args):
     if args.analyze:
         print(f"Analyzing {audio_path}...")
         analysis = analyze_track(audio_path, full=True)
-        analysis.pop("_waveform", None)
 
     track = proj.import_track(audio_path, **analysis)
     print(f"Imported: {track.title} -> {track.path}")
@@ -87,7 +86,6 @@ def cmd_scan(args):
             print(f"  Analyzing {f.name}...")
             try:
                 analysis = analyze_track(str(f), full=True)
-                analysis.pop("_waveform", None)
             except Exception as e:
                 print(f"    Analysis failed: {e}", file=sys.stderr)
 
@@ -110,7 +108,6 @@ def cmd_analyze(args):
     track = proj.library[idx]
     print(f"Analyzing {track.path}...")
     analysis = analyze_track(track.path, full=args.full)
-    analysis.pop("_waveform", None)
 
     track.bpm = analysis["bpm"]
     track.key = analysis["key"]
@@ -120,6 +117,7 @@ def cmd_analyze(args):
         track.cue_in = analysis.get("cue_in")
         track.cue_out = analysis.get("cue_out")
         track.energy = analysis.get("energy", [])
+        track.waveform = analysis.get("_waveform", [])
 
     proj.save()
     print(json.dumps({
@@ -142,7 +140,6 @@ def cmd_analyze_all(args):
         print(f"  [{i}] Analyzing {track.title}...")
         try:
             analysis = analyze_track(track.path, full=args.full)
-            analysis.pop("_waveform", None)
             track.bpm = analysis["bpm"]
             track.key = analysis["key"]
             track.duration = analysis["duration"]
@@ -151,6 +148,7 @@ def cmd_analyze_all(args):
                 track.cue_in = analysis.get("cue_in")
                 track.cue_out = analysis.get("cue_out")
                 track.energy = analysis.get("energy", [])
+                track.waveform = analysis.get("_waveform", [])
             count += 1
             print(f"       {track.bpm} BPM, {track.key}, {track.bars} bars")
         except Exception as e:
@@ -227,12 +225,75 @@ def cmd_timeline_append(args):
     print(f"Appended [{args.index}] {t.title} to timeline (pos {len(proj.timeline) - 1})")
 
 
+def cmd_timeline_move(args):
+    proj = get_project(args.project)
+    proj.move_timeline_track(args.from_pos, args.to_pos)
+    proj.save()
+    print(f"Moved timeline position {args.from_pos} -> {args.to_pos}")
+    cmd_timeline_show(args)
+
+
+def cmd_timeline_remove(args):
+    proj = get_project(args.project)
+    t = proj.library[proj.timeline[args.pos]]
+    proj.remove_from_timeline(args.pos)
+    proj.save()
+    print(f"Removed [{args.pos}] {t.title} from timeline")
+
+
 def cmd_transition_add(args):
     proj = get_project(args.project)
     proj.add_transition(args.from_idx, args.to_idx,
                         type=args.type, length_bars=args.bars)
     proj.save()
     print(f"Transition added: {args.from_idx} -> {args.to_idx} ({args.type}, {args.bars} bars)")
+
+
+def cmd_transition_edit(args):
+    proj = get_project(args.project)
+    proj.set_transition(args.pos, args.type, args.bars)
+    proj.save()
+    print(f"Transition [{args.pos}]: {args.type} {args.bars} bars")
+
+
+def cmd_transition_list(args):
+    proj = get_project(args.project)
+    if not proj.transitions:
+        print("No transitions defined.")
+        return
+    for tr in proj.transitions:
+        a = proj.library[proj.timeline[tr.from_track]].title
+        b = proj.library[proj.timeline[tr.to_track]].title
+        flags = []
+        if tr.tempo_sync:
+            flags.append("tempo-sync")
+        if tr.beat_aligned:
+            flags.append("beat-aligned")
+        flag_str = f" ({', '.join(flags)})" if flags else ""
+        print(f"  [{tr.from_track}] {a} -> {b}  {tr.type} {tr.length_bars}b{flag_str}")
+
+
+def cmd_transition_remove(args):
+    proj = get_project(args.project)
+    proj.transitions = [t for t in proj.transitions if t.from_track != args.pos]
+    proj.save()
+    print(f"Removed transition at position {args.pos}")
+
+
+def cmd_cue(args):
+    """Set cue points for a track."""
+    proj = get_project(args.project)
+    idx = args.index
+    if idx >= len(proj.library):
+        print(f"Track index {idx} out of range", file=sys.stderr)
+        sys.exit(1)
+    track = proj.library[idx]
+    if args.cue_in is not None:
+        track.cue_in = args.cue_in
+    if args.cue_out is not None:
+        track.cue_out = args.cue_out
+    proj.save()
+    print(f"Cue points for [{idx}] {track.title}: in={track.cue_in}s out={track.cue_out}s")
 
 
 def cmd_info(args):
@@ -245,7 +306,7 @@ def cmd_info(args):
 
 
 def cmd_render(args):
-    """Render timeline to a WAV file with transitions."""
+    """Render timeline to audio file (WAV, MP3, FLAC)."""
     from pymixter.core.mixer import render_to_file
 
     proj = get_project(args.project)
@@ -259,7 +320,8 @@ def cmd_render(args):
         print(f"  [{pos+1}/{total}] {msg}")
 
     print(f"Rendering {len(proj.timeline)} tracks...")
-    path = render_to_file(proj, output, on_progress=progress)
+    path = render_to_file(proj, output, on_progress=progress,
+                          quality=getattr(args, 'quality', None))
 
     # Show duration
     from pedalboard.io import AudioFile
@@ -429,9 +491,11 @@ def main():
     p_open = sub.add_parser("open", help="Open project (JSON or Rekordbox XML)")
     p_open.add_argument("file", help="Project file (.json or .xml)")
 
-    p_render = sub.add_parser("render", help="Render timeline to WAV file")
+    p_render = sub.add_parser("render", help="Render timeline to audio file")
     p_render.add_argument("--output", "-o", default="mix_output.wav",
-                          help="Output WAV path")
+                          help="Output path (.wav, .mp3, .flac)")
+    p_render.add_argument("--quality", default=None,
+                          help="MP3 quality (e.g., V0, V2, 320)")
 
     sub.add_parser("validate", help="Check timeline for issues")
 
@@ -439,11 +503,21 @@ def main():
     sub.add_parser("info")
     sub.add_parser("suggest")
 
+    p_cue = sub.add_parser("cue", help="Set cue points for a track")
+    p_cue.add_argument("index", type=int)
+    p_cue.add_argument("--in", dest="cue_in", type=float, default=None)
+    p_cue.add_argument("--out", dest="cue_out", type=float, default=None)
+
     p_tl = sub.add_parser("timeline")
     tl_sub = p_tl.add_subparsers(dest="tl_cmd")
     tl_sub.add_parser("show")
     p_tl_append = tl_sub.add_parser("append")
     p_tl_append.add_argument("index", type=int)
+    p_tl_move = tl_sub.add_parser("move")
+    p_tl_move.add_argument("from_pos", type=int)
+    p_tl_move.add_argument("to_pos", type=int)
+    p_tl_remove = tl_sub.add_parser("remove")
+    p_tl_remove.add_argument("pos", type=int)
 
     p_tr = sub.add_parser("transition")
     tr_sub = p_tr.add_subparsers(dest="tr_cmd")
@@ -452,6 +526,13 @@ def main():
     p_tr_add.add_argument("to_idx", type=int)
     p_tr_add.add_argument("--type", default="crossfade")
     p_tr_add.add_argument("--bars", type=int, default=16)
+    p_tr_edit = tr_sub.add_parser("edit")
+    p_tr_edit.add_argument("pos", type=int)
+    p_tr_edit.add_argument("--type", default="crossfade")
+    p_tr_edit.add_argument("--bars", type=int, default=16)
+    tr_sub.add_parser("list")
+    p_tr_remove = tr_sub.add_parser("remove")
+    p_tr_remove.add_argument("pos", type=int)
 
     args = parser.parse_args()
 
@@ -471,22 +552,33 @@ def main():
         "export": cmd_export,
         "import": cmd_import_xml,
         "open": cmd_open,
+        "cue": cmd_cue,
     }
 
     if args.command in commands:
         commands[args.command](args)
     elif args.command == "timeline":
-        if args.tl_cmd == "show":
-            cmd_timeline_show(args)
-        elif args.tl_cmd == "append":
-            cmd_timeline_append(args)
+        tl_dispatch = {
+            "show": cmd_timeline_show,
+            "append": cmd_timeline_append,
+            "move": cmd_timeline_move,
+            "remove": cmd_timeline_remove,
+        }
+        if args.tl_cmd in tl_dispatch:
+            tl_dispatch[args.tl_cmd](args)
         else:
-            print("Usage: mix timeline {show|append}")
+            print("Usage: timeline {show|append|move|remove}")
     elif args.command == "transition":
-        if args.tr_cmd == "add":
-            cmd_transition_add(args)
+        tr_dispatch = {
+            "add": cmd_transition_add,
+            "edit": cmd_transition_edit,
+            "list": cmd_transition_list,
+            "remove": cmd_transition_remove,
+        }
+        if args.tr_cmd in tr_dispatch:
+            tr_dispatch[args.tr_cmd](args)
         else:
-            print("Usage: mix transition {add}")
+            print("Usage: transition {add|edit|list|remove}")
     else:
         parser.print_help()
 

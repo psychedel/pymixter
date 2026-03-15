@@ -13,6 +13,7 @@ import numpy as np
 from pedalboard import (
     Pedalboard, Gain, Delay, Reverb,
     HighpassFilter, LowpassFilter, LowShelfFilter,
+    time_stretch,
 )
 from pedalboard.io import AudioFile, WriteableAudioFile
 
@@ -65,6 +66,44 @@ def _make_fade(length: int, direction: str = "in") -> np.ndarray:
     if direction == "out":
         fade = 1.0 - fade
     return fade
+
+
+def _snap_to_beat(frame: int, beats: list[float], sr: int,
+                  direction: str = "before") -> int:
+    """Snap a frame position to the nearest beat boundary.
+
+    Args:
+        frame: position in sample frames
+        beats: list of beat positions in seconds
+        sr: sample rate
+        direction: "before" snaps to beat at or before, "nearest" to closest
+    """
+    if not beats:
+        return frame
+    t = frame / sr
+    if direction == "before":
+        candidates = [b for b in beats if b <= t + 0.01]
+        if candidates:
+            return int(candidates[-1] * sr)
+        return frame
+    else:
+        best = min(beats, key=lambda b: abs(b - t))
+        return int(best * sr)
+
+
+def _tempo_match(audio: np.ndarray, source_bpm: float, target_bpm: float,
+                 sr: int) -> np.ndarray:
+    """Time-stretch audio to match target BPM.
+
+    Returns stretched audio (channels, frames). Clamps ratio to 0.5x–2.0x.
+    """
+    if not source_bpm or not target_bpm:
+        return audio
+    ratio = source_bpm / target_bpm
+    ratio = max(0.5, min(2.0, ratio))
+    if abs(ratio - 1.0) < 0.01:
+        return audio
+    return time_stretch(audio, sr, stretch_factor=ratio)
 
 
 def render_crossfade(a_tail: np.ndarray, b_head: np.ndarray,
@@ -215,6 +254,12 @@ def render_timeline(project: Project,
 
             # Solo section: from solo_start to (end - overlap)
             solo_end = audio.shape[1] - overlap_frames
+
+            # Beat-align: snap solo_end to nearest beat boundary
+            if tr.beat_aligned and track.beats:
+                solo_end = _snap_to_beat(solo_end, track.beats, sr, "before")
+                overlap_frames = audio.shape[1] - solo_end
+
             if solo_end > solo_start:
                 segments.append(audio[:, solo_start:solo_end])
 
@@ -222,6 +267,14 @@ def render_timeline(project: Project,
             a_tail = audio[:, solo_end:]
             next_audio, _ = tracks_audio[pos + 1]
             b_head = next_audio[:, :overlap_frames]
+
+            # Tempo sync: time-stretch b_head to match track A's BPM
+            if tr.tempo_sync and track.bpm and next_track.bpm and tr.type != "cut":
+                b_head = _tempo_match(b_head, next_track.bpm, track.bpm, sr)
+                # Re-align lengths after stretch
+                min_len = min(a_tail.shape[1], b_head.shape[1])
+                a_tail = a_tail[:, :min_len]
+                b_head = b_head[:, :min_len]
 
             renderer = TRANSITION_RENDERERS.get(tr.type, render_crossfade)
             transition_audio = renderer(a_tail, b_head, sr)
@@ -243,10 +296,11 @@ def render_timeline(project: Project,
 
 
 def render_to_file(project: Project, output_path: str,
-                   on_progress: callable | None = None) -> str:
-    """Render timeline to a WAV file.
+                   on_progress: callable | None = None,
+                   quality: str | None = None) -> str:
+    """Render timeline to an audio file (WAV, MP3, or FLAC).
 
-    Returns the output file path.
+    Format is inferred from file extension. Returns the output file path.
     """
     audio, sr = render_timeline(project, on_progress=on_progress)
 
@@ -254,12 +308,21 @@ def render_to_file(project: Project, output_path: str,
         raise ValueError("Nothing to render — timeline is empty")
 
     out = Path(output_path)
-    with AudioFile(str(out), "w", samplerate=sr,
-                   num_channels=audio.shape[0]) as f:
-        f.write(audio)
+    ext = out.suffix.lower()
+
+    # Build kwargs for AudioFile writer
+    write_kwargs = {"samplerate": sr, "num_channels": audio.shape[0]}
+    if ext == ".mp3" and quality:
+        write_kwargs["quality"] = quality
+
+    with AudioFile(str(out), "w", **write_kwargs) as f:
+        # Write in chunks to avoid memory issues with large mixes
+        chunk_size = sr * 10  # 10 seconds
+        for i in range(0, audio.shape[1], chunk_size):
+            f.write(audio[:, i:i + chunk_size])
 
     duration = audio.shape[1] / sr
-    log.info("Rendered %.1fs to %s", duration, out)
+    log.info("Rendered %.1fs to %s (%s)", duration, out, ext)
     return str(out)
 
 
