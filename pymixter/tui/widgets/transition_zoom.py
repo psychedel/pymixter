@@ -166,6 +166,7 @@ class TransitionZoom(Static, can_focus=True):
                 "cut": "┃┃ Cut",
                 "echo_out": "»» Echo Out",
                 "filter_sweep": "∿∿ Filter Sweep",
+                "stem_swap": "◈◈ Stem Swap",
             }.get(tr.type, tr.type)
             lines.append(f"  {sym}", style="#c8a848")
             lines.append(f"  {tr.length_bars} bars", style="bold")

@@ -255,6 +255,101 @@ def render_filter_sweep(a_tail: np.ndarray, b_head: np.ndarray,
     return result
 
 
+def render_stem_swap(a_tail: np.ndarray, b_head: np.ndarray,
+                     sr: int,
+                     track_a: Track | None = None,
+                     track_b: Track | None = None) -> np.ndarray:
+    """Stem-aware transition — swap individual stems sequentially.
+
+    Uses separated stems (drums, bass, vocals, other) to create a
+    musically intelligent crossfade:
+    1. First 25%: swap drums (A drums out, B drums in)
+    2. 25-50%: swap bass
+    3. 50-75%: swap other/synths
+    4. 75-100%: swap vocals
+
+    Falls back to EQ fade if stems aren't available.
+    """
+    length = min(a_tail.shape[1], b_head.shape[1])
+
+    # Check if both tracks have stems
+    if not track_a or not track_b or not track_a.stems or not track_b.stems:
+        return render_eq_fade(a_tail, b_head, sr)
+
+    stem_order = ["drums", "bass", "other", "vocals"]
+
+    # Load available stems for both tracks
+    a_stems = {}
+    b_stems = {}
+    for stem_name in stem_order:
+        if stem_name in track_a.stems and stem_name in track_b.stems:
+            try:
+                a_audio = _load_stem_audio(track_a.stems[stem_name], length, sr)
+                b_audio = _load_stem_audio(track_b.stems[stem_name], length, sr)
+                a_stems[stem_name] = a_audio
+                b_stems[stem_name] = b_audio
+            except Exception:
+                pass
+
+    if not a_stems:
+        return render_eq_fade(a_tail, b_head, sr)
+
+    # Build transition: each stem swaps from A→B at its own point
+    result = np.zeros((2, length), dtype=np.float32)
+    available = [s for s in stem_order if s in a_stems]
+    n_stems = len(available)
+    section_size = length // n_stems if n_stems > 0 else length
+
+    for idx, stem_name in enumerate(available):
+        a_stem = a_stems[stem_name]
+        b_stem = b_stems[stem_name]
+        swap_point = idx * section_size
+
+        # Crossfade zone around swap point
+        fade_len = max(1, section_size // 4)
+        fade_end = min(swap_point + fade_len, length)
+
+        # Before swap: this stem plays from A
+        if swap_point > 0:
+            result[:, :swap_point] += a_stem[:, :swap_point]
+
+        # Crossfade zone
+        actual_fade = fade_end - swap_point
+        if actual_fade > 0:
+            fade = _make_fade(actual_fade, "in")
+            result[:, swap_point:fade_end] += a_stem[:, swap_point:fade_end] * (1.0 - fade)
+            result[:, swap_point:fade_end] += b_stem[:, swap_point:fade_end] * fade
+
+        # After fade: this stem plays from B
+        if fade_end < length:
+            result[:, fade_end:] += b_stem[:, fade_end:]
+
+    return result
+
+
+def _load_stem_audio(stem_path: str, target_length: int,
+                     sr: int) -> np.ndarray:
+    """Load a stem file and pad/trim to target_length frames."""
+    with AudioFile(stem_path) as f:
+        if f.samplerate != sr:
+            resampled = f.resampled_to(sr)
+            audio = resampled.read(resampled.frames)
+        else:
+            audio = f.read(f.frames)
+
+    if audio.shape[0] == 1:
+        audio = np.vstack([audio, audio])
+
+    # Trim or pad to match target length
+    if audio.shape[1] > target_length:
+        audio = audio[:, :target_length]
+    elif audio.shape[1] < target_length:
+        pad = np.zeros((2, target_length - audio.shape[1]), dtype=np.float32)
+        audio = np.concatenate([audio, pad], axis=1)
+
+    return audio
+
+
 # Dispatch table for transition renderers
 TRANSITION_RENDERERS = {
     "crossfade": render_crossfade,
@@ -262,6 +357,7 @@ TRANSITION_RENDERERS = {
     "cut": render_cut,
     "echo_out": render_echo_out,
     "filter_sweep": render_filter_sweep,
+    "stem_swap": render_stem_swap,
 }
 
 
@@ -350,7 +446,11 @@ def render_timeline(project: Project,
                 b_head = _key_match(b_head, shift, sr)
 
             renderer = TRANSITION_RENDERERS.get(tr.type, render_crossfade)
-            transition_audio = renderer(a_tail, b_head, sr)
+            if tr.type == "stem_swap":
+                transition_audio = renderer(a_tail, b_head, sr,
+                                            track_a=track, track_b=next_track)
+            else:
+                transition_audio = renderer(a_tail, b_head, sr)
             segments.append(transition_audio)
 
             prev_overlap = min(overlap_frames, next_audio.shape[1])
@@ -461,7 +561,11 @@ def render_transition_preview(project: Project, pos: int,
         b_head = _key_match(b_head, shift, sr)
 
     renderer = TRANSITION_RENDERERS.get(tr.type, render_crossfade)
-    transition_audio = renderer(a_tail, b_head, sr)
+    if tr.type == "stem_swap":
+        transition_audio = renderer(a_tail, b_head, sr,
+                                    track_a=track_a, track_b=track_b)
+    else:
+        transition_audio = renderer(a_tail, b_head, sr)
 
     # Add context before and after the transition
     ctx_frames = int(context_seconds * sr)

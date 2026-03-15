@@ -197,6 +197,10 @@ def pick_transition_type(a: Track, b: Track) -> tuple[str, int]:
     if a.fade_out_start is not None and key_ok and bpm_diff < 3:
         return "crossfade", 32
 
+    # Both tracks have stems, close BPM, compatible key → stem swap
+    if key_ok and bpm_diff < 3 and a.stems and b.stems:
+        return "stem_swap", 32
+
     # Same key, close BPM → long EQ fade (bass swap)
     if key_ok and bpm_diff < 3:
         return "eq_fade", 32

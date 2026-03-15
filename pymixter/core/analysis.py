@@ -1,7 +1,7 @@
-"""Audio analysis: BPM, key detection, beat grid, energy, waveform.
+"""Audio analysis: BPM, key detection, beat grid, energy, waveform, spectral descriptors.
 
-Uses essentia for key detection and BPM (more accurate than librosa chroma),
-with librosa as fallback for beat grid, cue points, and energy.
+Uses essentia for all audio analysis — key, BPM, spectral features,
+silence detection, tuning, pitch, and harmonic content.
 """
 
 from __future__ import annotations
@@ -20,7 +20,9 @@ def analyze_track(path: str, full: bool = False) -> dict:
 
     With full=True, also computes beat grid, cue points, energy profile,
     loudness (LUFS/ReplayGain), danceability, dynamic complexity, onsets,
-    fade detection, and chord progression.
+    fade detection, chord progression, spectral descriptors, silence rate,
+    tuning frequency, inharmonicity, pitch, and tempo stability.
+
     Returns a dict suitable for passing to Project.add_track(**analysis).
 
     Raises AnalysisError with a human-readable message if the file cannot
@@ -46,8 +48,9 @@ def analyze_track(path: str, full: bool = False) -> dict:
     key_name, scale, _strength = es.KeyExtractor()(audio)
     key = key_name + ("m" if scale == "minor" else "")
 
-    # BPM + beat positions
-    bpm_val, beat_positions, *_ = es.RhythmExtractor2013()(audio)
+    # BPM + beat positions (keep full result for tempogram)
+    rhythm_result = es.RhythmExtractor2013()(audio)
+    bpm_val, beat_positions = rhythm_result[0], rhythm_result[1]
     bpm = round(float(bpm_val), 1)
     beat_times = [round(float(b), 4) for b in beat_positions]
 
@@ -101,6 +104,28 @@ def analyze_track(path: str, full: bool = False) -> dict:
         # Chord detection
         result["chords"] = _detect_chords(audio, sr, beat_times)
 
+        # Spectral descriptors + pitch (single combined frame pass)
+        spectral = _compute_spectral_and_pitch(audio, sr)
+        result.update(spectral)
+
+        # Silence rate via essentia SilenceRate
+        result["silence_rate"] = _compute_silence_rate(audio)
+
+        # Tuning frequency (detects microtonality / A=440 deviation)
+        result["tuning_frequency"] = _compute_tuning_frequency(audio, sr)
+
+        # Inharmonicity (harmonic content analysis)
+        result["inharmonicity"] = _compute_inharmonicity(audio, sr)
+
+        # Tempogram ratio from existing rhythm result (no re-computation)
+        result["tempogram_ratio"] = _tempogram_ratio_from_rhythm(rhythm_result)
+
+        # Refine cue points using silence rate
+        if result["silence_rate"] is not None and result["silence_rate"] > 0.3:
+            result["cue_in"], result["cue_out"] = _detect_cue_points(
+                audio, sr, beat_times, rms_factor=0.15,
+            )
+
     return result
 
 
@@ -126,11 +151,15 @@ def analyze_beats(path: str) -> dict:
 # ── Beat grid & cue points ──────────────────────────────────
 
 def _detect_cue_points(y: np.ndarray, sr: int,
-                       beat_times: list[float]) -> tuple[float, float]:
+                       beat_times: list[float],
+                       rms_factor: float = 0.1) -> tuple[float, float]:
     """Find musically meaningful start/end points.
 
-    Cue-in: first beat where RMS exceeds 10% of track peak.
-    Cue-out: last beat where RMS exceeds 10% of track peak.
+    Cue-in: first beat where RMS exceeds rms_factor of track peak.
+    Cue-out: last beat where RMS exceeds rms_factor of track peak.
+
+    A higher rms_factor (e.g. 0.15) is used for silence-heavy tracks
+    to skip past quiet intros/outros more aggressively.
     """
     if not beat_times:
         duration = len(y) / sr
@@ -143,7 +172,7 @@ def _detect_cue_points(y: np.ndarray, sr: int,
         np.sqrt(np.mean(y[i * hop:(i + 1) * hop] ** 2))
         for i in range(n_frames)
     ])
-    rms_threshold = 0.1 * np.sqrt(np.mean(y ** 2))
+    rms_threshold = rms_factor * np.sqrt(np.mean(y ** 2))
 
     def rms_at(t: float) -> float:
         idx = min(int(t * sr / hop), len(rms) - 1)
@@ -272,6 +301,196 @@ def _detect_chords(audio: np.ndarray, sr: int,
             prev_chord = chord
 
     return result
+
+
+# ── Spectral features + pitch (combined single pass) ─────────
+
+def _compute_spectral_and_pitch(audio: np.ndarray, sr: int) -> dict:
+    """Compute spectral descriptors and pitch in a single frame-by-frame pass.
+
+    Returns dict with: spectral_centroid, spectral_rolloff, spectral_flux,
+    mfcc (13 mean coefficients), mel_bands (40 mean band energies),
+    pitch_mean, pitch_std.
+    """
+    import essentia.standard as es
+
+    frame_size = 2048
+    hop_size = 1024
+    spec_size = frame_size // 2 + 1
+
+    w = es.Windowing(type='hann')
+    spectrum = es.Spectrum(size=frame_size)
+    centroid = es.Centroid(range=sr / 2)
+    rolloff = es.RollOff()
+    flux = es.Flux()
+    mfcc_algo = es.MFCC(inputSize=spec_size, numberCoefficients=13)
+    mel_algo = es.MelBands(inputSize=spec_size, numberBands=40)
+    pitch_algo = es.PitchYinFFT(frameSize=frame_size)
+
+    centroids = []
+    rolloffs = []
+    fluxes = []
+    mfccs = []
+    mel_list = []
+    pitches = []
+
+    for frame in es.FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size):
+        windowed = w(frame)
+        spec = spectrum(windowed)
+
+        centroids.append(float(centroid(spec)))
+        rolloffs.append(float(rolloff(spec)))
+        fluxes.append(float(flux(spec)))
+
+        bands, coeffs = mfcc_algo(spec)
+        mfccs.append(coeffs)
+
+        mel_b = mel_algo(spec)
+        mel_list.append(mel_b)
+
+        pitch, confidence = pitch_algo(spec)
+        if confidence > 0.5 and pitch > 20:
+            pitches.append(float(pitch))
+
+    if not centroids:
+        return {
+            "spectral_centroid": None, "spectral_rolloff": None,
+            "spectral_flux": None, "mfcc": [], "mel_bands": [],
+            "pitch_mean": None, "pitch_std": None,
+        }
+
+    result = {
+        "spectral_centroid": round(float(np.mean(centroids)), 2),
+        "spectral_rolloff": round(float(np.mean(rolloffs)), 2),
+        "spectral_flux": round(float(np.mean(fluxes)), 4),
+        "mfcc": [round(float(x), 4) for x in np.mean(mfccs, axis=0)],
+        "mel_bands": [round(float(x), 4) for x in np.mean(mel_list, axis=0)],
+    }
+
+    if pitches:
+        result["pitch_mean"] = round(float(np.mean(pitches)), 2)
+        result["pitch_std"] = round(float(np.std(pitches)), 2)
+    else:
+        result["pitch_mean"] = None
+        result["pitch_std"] = None
+
+    return result
+
+
+# ── Silence detection ─────────────────────────────────────────
+
+def _compute_silence_rate(audio: np.ndarray) -> float:
+    """Compute fraction of silent frames using essentia SilenceRate.
+
+    Uses multiple thresholds (-50dB, -40dB, -30dB) and returns
+    the rate at -50dB (most sensitive). Useful for detecting tracks
+    with long intros/outros or ambient sections.
+    """
+    import essentia.standard as es
+
+    frame_size = 2048
+    hop_size = 1024
+    # Thresholds in linear amplitude
+    thresholds = [
+        10 ** (-50 / 20),  # -50 dB
+        10 ** (-40 / 20),  # -40 dB
+        10 ** (-30 / 20),  # -30 dB
+    ]
+    silence_rate = es.SilenceRate(thresholds=thresholds)
+
+    rates = []
+    for frame in es.FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size):
+        r = silence_rate(frame)
+        rates.append(r)
+
+    if not rates:
+        return 1.0
+
+    # Average silence rate at -50dB threshold (first threshold)
+    avg = float(np.mean([r[0] for r in rates]))
+    return round(avg, 3)
+
+
+# ── Tuning & inharmonicity ────────────────────────────────────
+
+def _compute_tuning_frequency(audio: np.ndarray, sr: int) -> float:
+    """Detect tuning reference frequency (deviation from A=440Hz).
+
+    Returns the estimated tuning frequency in Hz.
+    """
+    import essentia.standard as es
+
+    frame_size = 4096
+    hop_size = 2048
+    w = es.Windowing(type='blackmanharris62')
+    spectrum = es.Spectrum(size=frame_size)
+    peaks = es.SpectralPeaks(orderBy='magnitude', magnitudeThreshold=0.00001,
+                              minFrequency=20, maxFrequency=3500)
+    tuning = es.TuningFrequency()
+
+    frequencies = []
+    for frame in es.FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size):
+        windowed = w(frame)
+        spec = spectrum(windowed)
+        freqs, mags = peaks(spec)
+        if len(freqs) > 0:
+            tf, _ = tuning(freqs, mags)
+            frequencies.append(float(tf))
+
+    return round(float(np.median(frequencies)), 2) if frequencies else 440.0
+
+
+def _compute_inharmonicity(audio: np.ndarray, sr: int) -> float:
+    """Compute mean inharmonicity across frames.
+
+    Inharmonicity measures deviation from harmonic series —
+    low for pitched/tonal content, high for percussive/noise.
+    """
+    import essentia.standard as es
+
+    frame_size = 4096
+    hop_size = 2048
+    w = es.Windowing(type='blackmanharris62')
+    spectrum = es.Spectrum(size=frame_size)
+    peaks = es.SpectralPeaks(orderBy='frequency', magnitudeThreshold=0.00001,
+                              minFrequency=20, maxFrequency=5000)
+    pitch_algo = es.PitchYinFFT(frameSize=frame_size)
+    inharm = es.Inharmonicity()
+
+    values = []
+    for frame in es.FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size):
+        windowed = w(frame)
+        spec = spectrum(windowed)
+        freqs, mags = peaks(spec)
+        pitch, confidence = pitch_algo(spec)
+        if confidence > 0.5 and len(freqs) >= 2 and pitch > 20:
+            try:
+                val = inharm(freqs, mags)
+                values.append(float(val))
+            except Exception:
+                pass
+
+    return round(float(np.mean(values)), 4) if values else 0.0
+
+
+# ── Tempogram ─────────────────────────────────────────────────
+
+def _tempogram_ratio_from_rhythm(rhythm_result: tuple) -> float:
+    """Extract tempo stability from an existing RhythmExtractor2013 result.
+
+    Takes the full tuple returned by RhythmExtractor2013 and computes
+    the ratio of secondary to primary tempo hypothesis confidence.
+    A ratio near 1.0 suggests tempo ambiguity (e.g. half/double time),
+    near 0.0 suggests very stable tempo.
+    """
+    try:
+        bpm_ests = rhythm_result[4]
+        if len(bpm_ests) >= 2 and bpm_ests[0][1] > 0:
+            ratio = float(bpm_ests[1][1] / bpm_ests[0][1])
+            return round(min(ratio, 1.0), 3)
+    except Exception:
+        pass
+    return 0.0
 
 
 # ── Waveform ─────────────────────────────────────────────────

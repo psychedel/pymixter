@@ -98,6 +98,17 @@ def _track_summary(idx: int, t: Track) -> dict:
         "has_chords": bool(t.chords),
         "fade_in_end": t.fade_in_end,
         "fade_out_start": t.fade_out_start,
+        "spectral_centroid": t.spectral_centroid,
+        "spectral_rolloff": t.spectral_rolloff,
+        "spectral_flux": t.spectral_flux,
+        "has_mfcc": bool(t.mfcc),
+        "has_mel_bands": bool(t.mel_bands),
+        "silence_rate": t.silence_rate,
+        "tuning_frequency": t.tuning_frequency,
+        "inharmonicity": t.inharmonicity,
+        "pitch_mean": t.pitch_mean,
+        "pitch_std": t.pitch_std,
+        "tempogram_ratio": t.tempogram_ratio,
         "path": t.path,
     }
 
@@ -163,6 +174,28 @@ def _apply_analysis(track: Track, analysis: dict, full: bool = True):
             track.fade_out_start = analysis["fade_out_start"]
         if analysis.get("chords"):
             track.chords = analysis["chords"]
+        if analysis.get("spectral_centroid") is not None:
+            track.spectral_centroid = analysis["spectral_centroid"]
+        if analysis.get("spectral_rolloff") is not None:
+            track.spectral_rolloff = analysis["spectral_rolloff"]
+        if analysis.get("spectral_flux") is not None:
+            track.spectral_flux = analysis["spectral_flux"]
+        if analysis.get("mfcc"):
+            track.mfcc = analysis["mfcc"]
+        if analysis.get("mel_bands"):
+            track.mel_bands = analysis["mel_bands"]
+        if analysis.get("silence_rate") is not None:
+            track.silence_rate = analysis["silence_rate"]
+        if analysis.get("tuning_frequency") is not None:
+            track.tuning_frequency = analysis["tuning_frequency"]
+        if analysis.get("inharmonicity") is not None:
+            track.inharmonicity = analysis["inharmonicity"]
+        if analysis.get("pitch_mean") is not None:
+            track.pitch_mean = analysis["pitch_mean"]
+        if analysis.get("pitch_std") is not None:
+            track.pitch_std = analysis["pitch_std"]
+        if analysis.get("tempogram_ratio") is not None:
+            track.tempogram_ratio = analysis["tempogram_ratio"]
 
 
 # ── Project tools ─────────────────────────────────────────────
@@ -540,8 +573,8 @@ def timeline_reorder(params: dict) -> dict:
 @tool("transition_set", "Set or update a transition between two consecutive timeline tracks.", {
     "properties": {
         "position": {"type": "integer", "description": "Timeline position of the outgoing track (from_track)"},
-        "type": {"type": "string", "enum": ["crossfade", "eq_fade", "cut", "echo_out", "filter_sweep"],
-                 "description": "Transition type. crossfade=smooth blend, eq_fade=bass swap, cut=instant switch, echo_out=echo trail, filter_sweep=resonant LP/HP sweep"},
+        "type": {"type": "string", "enum": ["crossfade", "eq_fade", "cut", "echo_out", "filter_sweep", "stem_swap"],
+                 "description": "Transition type. crossfade=smooth blend, eq_fade=bass swap, cut=instant switch, echo_out=echo trail, filter_sweep=resonant LP/HP sweep, stem_swap=sequential stem replacement (needs stems)"},
         "bars": {"type": "integer", "description": "Transition length in bars (4 beats each). Typical: 8–32"},
         "offset_beats": {"type": "integer", "description": "Shift transition start point by N beats (+ = later, - = earlier)"},
     },

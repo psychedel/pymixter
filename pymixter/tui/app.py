@@ -224,6 +224,17 @@ class MixApp(App):
         track.fade_in_end = analysis.get("fade_in_end")
         track.fade_out_start = analysis.get("fade_out_start")
         track.chords = analysis.get("chords", [])
+        track.spectral_centroid = analysis.get("spectral_centroid")
+        track.spectral_rolloff = analysis.get("spectral_rolloff")
+        track.spectral_flux = analysis.get("spectral_flux")
+        track.mfcc = analysis.get("mfcc", [])
+        track.mel_bands = analysis.get("mel_bands", [])
+        track.silence_rate = analysis.get("silence_rate")
+        track.tuning_frequency = analysis.get("tuning_frequency")
+        track.inharmonicity = analysis.get("inharmonicity")
+        track.pitch_mean = analysis.get("pitch_mean")
+        track.pitch_std = analysis.get("pitch_std")
+        track.tempogram_ratio = analysis.get("tempogram_ratio")
         self._save_and_sync()
         self._set_status(
             f"Analyzed: {track.title} — {track.bpm} BPM, {track.key}, "
@@ -1197,7 +1208,7 @@ class MixApp(App):
         self._save_and_sync()
         self._set_status(f"Removed [{pos}] {track.title} from timeline")
 
-    _TRANSITION_TYPES = ["crossfade", "eq_fade", "filter_sweep", "echo_out", "cut"]
+    _TRANSITION_TYPES = ["crossfade", "eq_fade", "filter_sweep", "echo_out", "cut", "stem_swap"]
 
     def action_cycle_transition(self):
         """Cycle transition type for last transition (t)."""

@@ -169,7 +169,7 @@ class TestAnalyzeAutomixIntegration:
         assert len(proj.transitions) == 3  # n-1 transitions
 
         # Each transition should have a valid type
-        valid_types = {"crossfade", "eq_fade", "filter_sweep", "echo_out", "cut"}
+        valid_types = {"crossfade", "eq_fade", "filter_sweep", "echo_out", "cut", "stem_swap"}
         for tr in proj.transitions:
             assert tr.type in valid_types
             assert tr.length_bars > 0

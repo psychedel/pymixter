@@ -65,6 +65,17 @@ class Track:
     fade_in_end: float | None = None  # detected fade-in end time (seconds)
     fade_out_start: float | None = None  # detected fade-out start time (seconds)
     chords: list[tuple[float, str]] = field(default_factory=list)  # (time, chord) pairs
+    spectral_centroid: float | None = None  # mean spectral centroid (Hz)
+    spectral_rolloff: float | None = None  # mean spectral rolloff (Hz)
+    spectral_flux: float | None = None  # mean spectral flux
+    mfcc: list[float] = field(default_factory=list)  # 13 mean MFCC coefficients
+    mel_bands: list[float] = field(default_factory=list)  # 40 mean mel band energies
+    silence_rate: float | None = None  # fraction of silent frames
+    tuning_frequency: float | None = None  # detected tuning ref (Hz, ~440)
+    inharmonicity: float | None = None  # mean inharmonicity (0=tonal, 1=noise)
+    pitch_mean: float | None = None  # mean fundamental frequency (Hz)
+    pitch_std: float | None = None  # pitch variation (Hz)
+    tempogram_ratio: float | None = None  # tempo ambiguity (0=stable, 1=ambiguous)
 
     def __post_init__(self):
         if not self.title:
@@ -149,7 +160,7 @@ class Track:
 class Transition:
     from_track: int  # index in timeline
     to_track: int
-    type: Literal["crossfade", "eq_fade", "cut", "echo_out", "filter_sweep"] = "crossfade"
+    type: Literal["crossfade", "eq_fade", "cut", "echo_out", "filter_sweep", "stem_swap"] = "crossfade"
     length_bars: int = 16
     offset_beats: int = 0  # shift transition start by N beats (+ = later)
     tempo_sync: bool = True
@@ -359,6 +370,9 @@ class Project:
     def suggest_next(self, limit: int = 5) -> list[tuple[int, Track, float, bool]]:
         """Suggest tracks compatible with the last timeline entry.
 
+        Scoring: key compatibility (10pts), BPM proximity (-0.5/bpm),
+        spectral similarity via MFCC cosine distance (up to 5pts).
+
         Returns list of (index, track, score, key_compatible).
         """
         if not self.timeline:
@@ -376,6 +390,10 @@ class Project:
             bpm_diff = abs(t.bpm - last.bpm)
             key_ok = t.key in compatible
             score = (10 if key_ok else 0) - bpm_diff * 0.5
+            # Spectral similarity bonus (MFCC cosine similarity)
+            sim = _mfcc_similarity(last.mfcc, t.mfcc)
+            if sim is not None:
+                score += sim * 5.0  # up to 5 bonus points
             candidates.append((i, t, score, key_ok))
 
         candidates.sort(key=lambda x: -x[2])
@@ -531,6 +549,21 @@ def key_semitone_distance(key_a: str | None, key_b: str | None) -> int | None:
         if best_shift is not None:
             break
     return best_shift
+
+
+def _mfcc_similarity(mfcc_a: list[float], mfcc_b: list[float]) -> float | None:
+    """Cosine similarity between two MFCC vectors (0–1, higher = more similar).
+
+    Returns None if either vector is empty.
+    """
+    if not mfcc_a or not mfcc_b or len(mfcc_a) != len(mfcc_b):
+        return None
+    dot = sum(a * b for a, b in zip(mfcc_a, mfcc_b))
+    norm_a = sum(a * a for a in mfcc_a) ** 0.5
+    norm_b = sum(b * b for b in mfcc_b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return None
+    return max(0.0, dot / (norm_a * norm_b))
 
 
 def find_audio_files(directory: str | Path) -> list[Path]:

@@ -128,6 +128,70 @@ class TrackInfo(Static):
                 lines.append(f"{t.dynamic_complexity:.1f}", style="#7a8a50")
             lines.append("\n")
 
+        # ── Spectral profile ──
+        has_spectral = any([t.spectral_centroid, t.spectral_rolloff, t.spectral_flux])
+        if has_spectral:
+            lines.append("\n")
+            lines.append("  Spectral  ", style="dim")
+            if t.spectral_centroid is not None:
+                lines.append("Centroid ", style="dim")
+                lines.append(f"{t.spectral_centroid:.0f}Hz", style="bold #a8b060")
+            if t.spectral_rolloff is not None:
+                lines.append("  Rolloff ", style="dim")
+                lines.append(f"{t.spectral_rolloff:.0f}Hz", style="#7a8a50")
+            if t.spectral_flux is not None:
+                lines.append("  Flux ", style="dim")
+                lines.append(f"{t.spectral_flux:.4f}", style="#7a8a50")
+            lines.append("\n")
+
+        # ── Timbral fingerprint ──
+        if t.mfcc:
+            lines.append("  Timbre  ", style="dim")
+            mfcc_min = min(t.mfcc)
+            mfcc_max = max(t.mfcc) if max(t.mfcc) != mfcc_min else mfcc_min + 1
+            for val in t.mfcc:
+                norm = (val - mfcc_min) / (mfcc_max - mfcc_min)
+                idx = min(int(norm * (len(_BLOCKS) - 1)), len(_BLOCKS) - 1)
+                lines.append(_BLOCKS[idx], style="#c8a848")
+            lines.append("\n")
+
+        # ── Pitch & tuning ──
+        has_pitch = any([t.pitch_mean, t.tuning_frequency, t.inharmonicity])
+        if has_pitch:
+            lines.append("  ", style="")
+            if t.pitch_mean is not None:
+                lines.append("Pitch ", style="dim")
+                lines.append(f"{t.pitch_mean:.0f}Hz", style="bold #a8b060")
+                if t.pitch_std is not None:
+                    lines.append(f" ±{t.pitch_std:.0f}", style="dim")
+            if t.tuning_frequency is not None:
+                deviation = t.tuning_frequency - 440.0
+                lines.append("   Tuning ", style="dim")
+                lines.append(f"{t.tuning_frequency:.1f}Hz", style="#7a8a50")
+                if abs(deviation) > 0.5:
+                    sign = "+" if deviation > 0 else ""
+                    lines.append(f" ({sign}{deviation:.1f})", style="#c87848")
+            if t.inharmonicity is not None:
+                lines.append("   Inharm ", style="dim")
+                lines.append(f"{t.inharmonicity:.3f}", style="#7a8a50")
+            lines.append("\n")
+
+        # ── Silence & tempo stability ──
+        has_extras = t.silence_rate is not None or t.tempogram_ratio is not None
+        if has_extras:
+            lines.append("  ", style="")
+            if t.silence_rate is not None and t.silence_rate > 0.01:
+                lines.append("Silence ", style="dim")
+                pct = t.silence_rate * 100
+                color = "#c87848" if pct > 20 else "#7a8a50"
+                lines.append(f"{pct:.0f}%", style=color)
+            if t.tempogram_ratio is not None and t.tempogram_ratio > 0.1:
+                lines.append("   Tempo stability ", style="dim")
+                stability = 1.0 - t.tempogram_ratio
+                color = "#c87848" if stability < 0.5 else "#a8b060"
+                lines.append(f"{stability:.0%}", style=color)
+            lines.append("\n")
+
         # ── Fade detection ──
         if t.fade_in_end is not None or t.fade_out_start is not None:
             lines.append("  Fades ", style="dim")
