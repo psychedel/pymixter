@@ -36,9 +36,15 @@ class LibraryTable(DataTable):
         self.add_column("E", key="energy", width=6)
         self.cursor_type = "row"
 
-    def refresh_library(self, project: Project, reference_idx: int | None = None):
+    def refresh_library(
+        self,
+        project: Project,
+        reference_idx: int | None = None,
+        analyzing: set[int] | None = None,
+    ):
         """Refresh library table. If reference_idx given, color by compatibility."""
         self.clear()
+        _busy = analyzing or set()
 
         # Determine reference track for compatibility coloring
         ref = None
@@ -82,7 +88,13 @@ class LibraryTable(DataTable):
             # Mini energy sparkline (6 chars)
             energy_cell = _mini_energy(t.energy) if t.energy else Text("", style="dim")
 
-            self.add_row(t.title, bpm_cell, key_cell, dur, energy_cell, key=str(i))
+            # Show analyzing indicator
+            if i in _busy:
+                title_cell = Text("⟳ ", style="bold #c8a848") + Text(t.title)
+            else:
+                title_cell = Text(t.title)
+
+            self.add_row(title_cell, bpm_cell, key_cell, dur, energy_cell, key=str(i))
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected):
         try:

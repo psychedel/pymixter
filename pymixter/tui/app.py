@@ -107,6 +107,7 @@ class MixApp(App):
         self.theme = "forest"
         self.project_path = project_path
         self._selected_track_idx: int | None = None
+        self._analyzing_indices: set[int] = set()
         self._last_version: int = 0
         self._watcher: Timer | None = None
         self._position_timer: Timer | None = None
@@ -167,6 +168,11 @@ class MixApp(App):
 
     def on_worker_state_changed(self, event: Worker.StateChanged):
         worker = event.worker
+        # Clear analyzing indicator on cancelled workers
+        if worker.state == WorkerState.CANCELLED and worker.name == "analyze":
+            self._analyzing_indices.clear()
+            self._refresh_all()
+            return
         if worker.state not in (WorkerState.SUCCESS, WorkerState.ERROR):
             return
         handler = {
@@ -203,9 +209,20 @@ class MixApp(App):
 
     def _on_worker_analyze(self, worker: Worker):
         if worker.error:
+            # Clear analyzing indicator on error too
+            try:
+                idx = worker.result[0] if worker.result else None
+            except Exception:
+                idx = None
+            if idx is not None:
+                self._analyzing_indices.discard(idx)
+            else:
+                self._analyzing_indices.clear()
+            self._refresh_all()
             self._set_status(f"Analysis failed: {worker.error}")
             return
         idx, analysis = worker.result
+        self._analyzing_indices.discard(idx)
         track = self.project.library[idx]
         self._checkpoint("Analyze track")
         track.bpm = analysis.get("bpm")
@@ -293,7 +310,9 @@ class MixApp(App):
             self._set_status("Project updated externally — reloaded")
 
     def _refresh_all(self):
-        self.query_one("#library", LibraryTable).refresh_library(self.project)
+        self.query_one("#library", LibraryTable).refresh_library(
+            self.project, analyzing=self._analyzing_indices,
+        )
         self.query_one("#timeline", TimelineView).refresh_timeline(self.project)
         # Refresh zoom if it's showing a transition
         zoom = self.query_one("#transition-zoom", TransitionZoom)
@@ -569,6 +588,8 @@ class MixApp(App):
             self._set_status(f"Track index {idx} out of range")
             return
         track = self.project.library[idx]
+        self._analyzing_indices.add(idx)
+        self._refresh_all()
         self._set_status(f"Analyzing {track.title}...")
 
         def _do_analyze():
