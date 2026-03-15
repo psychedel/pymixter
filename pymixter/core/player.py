@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 from pedalboard import (
-    Pedalboard, Gain, Limiter,
+    Pedalboard, Gain, Limiter, Compressor, NoiseGate,
     LowShelfFilter, HighShelfFilter, PeakFilter,
 )
 from pedalboard.io import AudioFile
@@ -56,17 +56,22 @@ class EQ:
 
 
 class Deck:
-    """Single playback deck with independent EQ, gain, and effects."""
+    """Single playback deck with independent EQ, gain, and effects.
+
+    The noise_gate is available but bypassed by default (threshold=-100dB).
+    Set threshold higher (e.g., -50dB) to activate.
+    """
 
     def __init__(self):
         self.eq = EQ()
         self.gain = Gain(gain_db=0.0)
+        self.noise_gate = NoiseGate(threshold_db=-100.0, release_ms=50.0)
         self.effects: list = []  # additional pedalboard plugins
         self._board = Pedalboard([])
 
     def _rebuild_board(self):
         """Rebuild the processing chain."""
-        plugins = [self.eq.low, self.eq.mid, self.eq.high, self.gain]
+        plugins = [self.noise_gate, self.eq.low, self.eq.mid, self.eq.high, self.gain]
         plugins.extend(self.effects)
         self._board = Pedalboard(plugins)
 
@@ -113,9 +118,13 @@ class Player:
         self.deck_a = Deck()
         self.deck_b = Deck()
         self.crossfader: float = 0.0  # 0.0 = full A, 1.0 = full B
+        self.master_compressor = Compressor(
+            threshold_db=-14.0, ratio=2.5, attack_ms=10.0, release_ms=80.0)
         self.master_gain = Gain(gain_db=0.0)
         self.master_limiter = Limiter(threshold_db=-1.0)
-        self._master_board = Pedalboard([self.master_gain, self.master_limiter])
+        self._master_board = Pedalboard([
+            self.master_compressor, self.master_gain, self.master_limiter,
+        ])
 
         # Callbacks
         self.on_position: callable | None = None

@@ -9,6 +9,11 @@ def main():
         sys.argv = sys.argv[1:]  # strip "cli"
         from pymixter.cli.main import main as cli_main
         cli_main()
+    elif len(sys.argv) > 1 and sys.argv[1] == "mcp":
+        # MCP server mode: `uv run python main.py mcp [--project project.json]`
+        sys.argv = sys.argv[1:]  # strip "mcp"
+        from pymixter.mcp.server import run_stdio
+        run_stdio()
     else:
         # TUI mode: `uv run python main.py [project.json]`
         project_path = sys.argv[1] if len(sys.argv) > 1 else "project.json"

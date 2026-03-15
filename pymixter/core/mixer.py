@@ -11,13 +11,13 @@ from pathlib import Path
 
 import numpy as np
 from pedalboard import (
-    Pedalboard, Gain, Delay, Reverb,
-    HighpassFilter, LowpassFilter,
+    Pedalboard, Gain, Delay, Reverb, Compressor,
+    HighpassFilter, LowpassFilter, LadderFilter, PitchShift,
     time_stretch,
 )
 from pedalboard.io import AudioFile
 
-from pymixter.core.project import Project, Track, Transition
+from pymixter.core.project import Project, Track, Transition, key_semitone_distance
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +106,19 @@ def _tempo_match(audio: np.ndarray, source_bpm: float, target_bpm: float,
     return time_stretch(audio, sr, stretch_factor=ratio)
 
 
+def _key_match(audio: np.ndarray, semitones: int, sr: int) -> np.ndarray:
+    """Pitch-shift audio by N semitones for harmonic key matching.
+
+    Uses pedalboard PitchShift — preserves tempo while changing pitch.
+    Clamps to ±6 semitones (half an octave).
+    """
+    if semitones == 0:
+        return audio
+    semitones = max(-6, min(6, semitones))
+    board = Pedalboard([PitchShift(semitones=float(semitones))])
+    return board(audio, sr)
+
+
 def render_crossfade(a_tail: np.ndarray, b_head: np.ndarray,
                      sr: int) -> np.ndarray:
     """Simple linear crossfade between two overlapping segments."""
@@ -188,12 +201,62 @@ def render_echo_out(a_tail: np.ndarray, b_head: np.ndarray,
     return a_wet * (1.0 - fade) + b * fade
 
 
+def render_filter_sweep(a_tail: np.ndarray, b_head: np.ndarray,
+                        sr: int) -> np.ndarray:
+    """Filter sweep transition — classic DJ low-pass filter close on A,
+    high-pass filter open on B, with resonance peak.
+
+    Uses LadderFilter for analog-style resonant sweep.
+    """
+    length = min(a_tail.shape[1], b_head.shape[1])
+    a = a_tail[:, :length].copy()
+    b = b_head[:, :length].copy()
+
+    n_steps = 16
+    chunk_size = length // n_steps
+    result = np.zeros_like(a[:, :length])
+
+    for i in range(n_steps):
+        start = i * chunk_size
+        end = start + chunk_size if i < n_steps - 1 else length
+        t = i / (n_steps - 1)  # 0.0 → 1.0
+
+        # A: lowpass sweep down 20kHz → 200Hz with resonance
+        cutoff_a = 20000.0 * (1.0 - t * 0.99)
+        board_a = Pedalboard([
+            LadderFilter(
+                mode=LadderFilter.Mode.LPF24,
+                cutoff_hz=cutoff_a,
+                resonance=0.3 + t * 0.4,  # resonance rises as filter closes
+            ),
+            Gain(gain_db=-t * 3),
+        ])
+        a_chunk = board_a(a[:, start:end], sr)
+
+        # B: highpass sweep down 8kHz → 20Hz
+        cutoff_b = 8000.0 * (1.0 - t) + 20.0
+        board_b = Pedalboard([
+            LadderFilter(
+                mode=LadderFilter.Mode.HPF24,
+                cutoff_hz=cutoff_b,
+                resonance=0.3 + (1.0 - t) * 0.4,
+            ),
+            Gain(gain_db=-(1.0 - t) * 3),
+        ])
+        b_chunk = board_b(b[:, start:end], sr)
+
+        result[:, start:end] = a_chunk + b_chunk
+
+    return result
+
+
 # Dispatch table for transition renderers
 TRANSITION_RENDERERS = {
     "crossfade": render_crossfade,
     "eq_fade": render_eq_fade,
     "cut": render_cut,
     "echo_out": render_echo_out,
+    "filter_sweep": render_filter_sweep,
 }
 
 
@@ -276,6 +339,11 @@ def render_timeline(project: Project,
                 a_tail = a_tail[:, :min_len]
                 b_head = b_head[:, :min_len]
 
+            # Key matching: pitch-shift b_head if keys clash
+            shift = key_semitone_distance(track.key, next_track.key)
+            if shift and tr.type not in ("cut", "echo_out"):
+                b_head = _key_match(b_head, shift, sr)
+
             renderer = TRANSITION_RENDERERS.get(tr.type, render_crossfade)
             transition_audio = renderer(a_tail, b_head, sr)
             segments.append(transition_audio)
@@ -292,6 +360,15 @@ def render_timeline(project: Project,
         return np.zeros((2, 0), dtype=np.float32), sr
 
     result = np.concatenate(segments, axis=1)
+
+    # Master chain: gentle compression + limiter for cohesive loudness
+    master = Pedalboard([
+        Compressor(threshold_db=-12.0, ratio=3.0,
+                   attack_ms=10.0, release_ms=100.0),
+        Gain(gain_db=2.0),  # makeup gain
+    ])
+    result = master(result, sr)
+
     return result, sr
 
 
@@ -372,6 +449,11 @@ def render_transition_preview(project: Project, pos: int,
         min_len = min(a_tail.shape[1], b_head.shape[1])
         a_tail = a_tail[:, :min_len]
         b_head = b_head[:, :min_len]
+
+    # Key matching: pitch-shift b_head if keys clash
+    shift = key_semitone_distance(track_a.key, track_b.key)
+    if shift and tr.type not in ("cut", "echo_out"):
+        b_head = _key_match(b_head, shift, sr)
 
     renderer = TRANSITION_RENDERERS.get(tr.type, render_crossfade)
     transition_audio = renderer(a_tail, b_head, sr)

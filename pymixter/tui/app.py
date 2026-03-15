@@ -14,7 +14,7 @@ from textual.widgets import Header, Footer, Static, TabbedContent, TabPane
 from textual.timer import Timer
 from textual.worker import Worker, WorkerState
 
-from pymixter.core.project import Project, find_audio_files
+from pymixter.core.project import Project, find_audio_files, parse_time
 from pymixter.core.analysis import analyze_track
 from pymixter.core.automix import automix
 from pymixter.core.player import Player, PlayerState
@@ -29,6 +29,7 @@ from pymixter.tui.widgets.timeline import TimelineView
 from pymixter.tui.widgets.track_info import TrackInfo
 from pymixter.tui.widgets.fuzzy_finder import FuzzyFinder, FileBrowser
 from pymixter.tui.widgets.command_console import CommandConsole
+from pymixter.tui.widgets.transition_zoom import TransitionZoom
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ class MixApp(App):
     #library { background: transparent; height: 1fr; }
     #timeline { background: transparent; height: 1fr; }
     #track-info { background: transparent; height: 1fr; }
+    #transition-zoom { background: transparent; height: 1fr; }
     Header { background: $primary-background; }
     Footer { background: $primary-background; }
     """
@@ -91,6 +93,7 @@ class MixApp(App):
         Binding("1", "tab_library", "Library", show=False),
         Binding("2", "tab_timeline", "Timeline", show=False),
         Binding("3", "tab_info", "Info", show=False),
+        Binding("4", "tab_zoom", "Zoom", show=False),
     ]
 
     def __init__(self, project_path: str = "project.json"):
@@ -137,6 +140,8 @@ class MixApp(App):
                 yield TimelineView(self.project, id="timeline")
             with TabPane("Track [3]", id="tab-info"):
                 yield TrackInfo(id="track-info")
+            with TabPane("Zoom [4]", id="tab-zoom"):
+                yield TransitionZoom(id="transition-zoom")
         yield Footer()
 
     def on_mouse_move(self, event: MouseMove) -> None:
@@ -252,6 +257,10 @@ class MixApp(App):
     def _refresh_all(self):
         self.query_one("#library", LibraryTable).refresh_library(self.project)
         self.query_one("#timeline", TimelineView).refresh_timeline(self.project)
+        # Refresh zoom if it's showing a transition
+        zoom = self.query_one("#transition-zoom", TransitionZoom)
+        if zoom._project is not None:
+            zoom.show_transition(self.project, zoom._position)
 
     def _set_status(self, msg: str):
         self.sub_title = msg
@@ -264,6 +273,10 @@ class MixApp(App):
     def _update_playback_status(self):
         """Update status bar with playback position and progress bar."""
         if self.player.state == PlayerState.STOPPED:
+            # Clear playback position on track info
+            ti = self.query_one("#track-info", TrackInfo)
+            if ti.playback_progress is not None:
+                ti.playback_progress = None
             return
         pos = _fmt_time(self.player.position)
         dur = _fmt_time(self.player.duration)
@@ -273,6 +286,8 @@ class MixApp(App):
         if status != self._last_status:
             self._last_status = status
             self._set_status(status)
+        # Update playback position on track info waveform
+        self.query_one("#track-info", TrackInfo).playback_progress = self.player.progress
 
     def action_toggle_play(self):
         if self.player.state == PlayerState.PLAYING:
@@ -334,8 +349,8 @@ class MixApp(App):
         # Commands that take no args or handle args internally
         dispatch = {
             "help": lambda: self._set_status(
-                "add scan analyze automix timeline transition cue eq gain bpm stems "
-                "xfader deckb preview render validate playmix export import undo redo"
+                "add scan analyze automix timeline transition cue grid zoom eq gain bpm "
+                "stems xfader deckb preview render validate playmix export import undo redo"
             ),
             "save": lambda: self.action_save_project(),
             "suggest": lambda: self._show_suggestions(),
@@ -370,6 +385,8 @@ class MixApp(App):
             "xfader": lambda: self._cmd_crossfader(args),
             "deckb": lambda: self._cmd_deck_b(args),
             "preview": lambda: self._preview_transition(args),
+            "grid": lambda: self._handle_grid_cmd(args),
+            "zoom": lambda: self._handle_zoom_cmd(args),
         }
 
         handler = dispatch.get(verb)
@@ -716,9 +733,17 @@ class MixApp(App):
     # ── Transition commands ──────────────────────────────────
 
     def _handle_transition_cmd(self, args: list[str]):
-        """Handle :transition subcommands."""
+        """Handle :transition subcommands.
+
+        Supported:
+            transition edit <pos> [type] [bars]     — set transition
+            transition offset <pos> <+/-beats>      — shift transition start
+            transition list                         — list all transitions
+            transition remove <pos>                 — remove transition
+            transition info <pos>                   — detailed transition info
+        """
         if not args:
-            self._set_status("transition: edit|list|remove")
+            self._set_status("transition: edit|offset|list|remove|info")
             return
         sub = args[0]
         if sub == "edit" and len(args) >= 2:
@@ -732,12 +757,47 @@ class MixApp(App):
                 self._set_status(f"Transition [{pos}]: {tr_type} {bars}b")
             except (ValueError, IndexError) as e:
                 self._set_status(f"Error: {e}")
+        elif sub == "offset" and len(args) >= 3:
+            try:
+                pos = int(args[1])
+                offset = int(args[2])
+                tr = self.project.get_transition(pos)
+                if not tr:
+                    self._set_status(f"No transition at [{pos}] — create one first")
+                    return
+                self._checkpoint("Offset transition")
+                tr.offset_beats = offset
+                self._save_and_sync()
+                direction = "later" if offset > 0 else "earlier"
+                self._set_status(
+                    f"Transition [{pos}] offset: {abs(offset)} beats {direction}"
+                )
+            except ValueError:
+                self._set_status("Usage: transition offset <pos> <+/-beats>")
+        elif sub == "info" and len(args) >= 2:
+            try:
+                pos = int(args[1])
+                tr = self.project.get_transition(pos)
+                if not tr:
+                    self._set_status(f"No transition at [{pos}]")
+                    return
+                offset_str = f" offset {tr.offset_beats}b" if tr.offset_beats else ""
+                self._set_status(
+                    f"[{pos}] {tr.type} {tr.length_bars}b{offset_str} "
+                    f"sync={tr.tempo_sync} aligned={tr.beat_aligned}"
+                )
+            except ValueError:
+                self._set_status("Usage: transition info <pos>")
         elif sub == "list":
             if not self.project.transitions:
                 self._set_status("No transitions")
             else:
-                parts = [f"[{t.from_track}] {t.type} {t.length_bars}b"
-                         for t in self.project.transitions]
+                parts = []
+                for t in self.project.transitions:
+                    s = f"[{t.from_track}] {t.type} {t.length_bars}b"
+                    if t.offset_beats:
+                        s += f" +{t.offset_beats}b"
+                    parts.append(s)
                 self._set_status(" | ".join(parts))
         elif sub == "remove" and len(args) >= 2:
             try:
@@ -751,35 +811,102 @@ class MixApp(App):
             except ValueError:
                 self._set_status("Usage: transition remove <pos>")
         else:
-            self._set_status("transition: edit <pos> [type] [bars] | list | remove <pos>")
+            self._set_status("transition: edit|offset|info|list|remove")
 
     # ── Cue point commands ──────────────────────────────────
 
     def _handle_cue_cmd(self, args: list[str]):
-        """Handle :cue in/out commands for selected track."""
+        """Handle :cue commands for selected track.
+
+        Supported:
+            cue in <time>       — set cue-in point (supports m:ss.ms format)
+            cue out <time>      — set cue-out point
+            cue in snap [beat|bar|phrase]  — snap cue-in to nearest grid
+            cue out snap [beat|bar|phrase] — snap cue-out to nearest grid
+            cue now in          — set cue-in to current playback position
+            cue now out         — set cue-out to current playback position
+            cue show            — display current cue points
+        """
         if self._selected_track_idx is None:
             self._set_status("Select a track first")
             return
-        if len(args) < 2:
-            self._set_status("cue: in <sec> | out <sec>")
+        if not args:
+            self._set_status("cue: in|out <time> | in|out snap [bar|phrase] | now in|out | show")
             return
         track = self.project.library[self._selected_track_idx]
-        try:
-            val = float(args[1])
-            if args[0] == "in":
-                self._checkpoint("Set cue in")
-                track.cue_in = val
-                self._save_and_sync()
-                self._set_status(f"Cue in: {_fmt_time(val)}")
-            elif args[0] == "out":
-                self._checkpoint("Set cue out")
-                track.cue_out = val
-                self._save_and_sync()
-                self._set_status(f"Cue out: {_fmt_time(val)}")
+        sub = args[0]
+
+        if sub == "show":
+            ci = _fmt_time(track.cue_in) if track.cue_in is not None else "—"
+            co = _fmt_time(track.cue_out) if track.cue_out is not None else "—"
+            play = _fmt_time(track.playable_duration)
+            self._set_status(f"Cue: {ci} → {co} ({play} playable)")
+            return
+
+        if sub == "now":
+            if len(args) < 2 or args[1] not in ("in", "out"):
+                self._set_status("Usage: cue now in|out")
+                return
+            if self.player.state == PlayerState.STOPPED:
+                self._set_status("Nothing playing — start playback first")
+                return
+            pos = self.player.position
+            self._checkpoint(f"Set cue {args[1]} from playback")
+            if args[1] == "in":
+                track.cue_in = round(pos, 3)
             else:
-                self._set_status("cue: in <sec> | out <sec>")
-        except ValueError:
-            self._set_status("Usage: cue in|out <seconds>")
+                track.cue_out = round(pos, 3)
+            self._save_and_sync()
+            self.query_one("#track-info", TrackInfo).show_track(track)
+            self._set_status(f"Cue {args[1]}: {_fmt_time(pos)} (from playback)")
+            return
+
+        if sub in ("in", "out"):
+            if len(args) < 2:
+                self._set_status(f"cue {sub}: <time> | snap [beat|bar|phrase]")
+                return
+
+            # Snap mode
+            if args[1] == "snap":
+                current = track.cue_in if sub == "in" else track.cue_out
+                if current is None:
+                    self._set_status(f"No cue {sub} set — set it first")
+                    return
+                mode = args[2] if len(args) > 2 else "beat"
+                if mode == "bar":
+                    snapped = track.snap_to_bar(current)
+                elif mode == "phrase":
+                    snapped = track.snap_to_phrase(current)
+                else:
+                    snapped = track.snap_to_beat(current)
+                self._checkpoint(f"Snap cue {sub} to {mode}")
+                if sub == "in":
+                    track.cue_in = snapped
+                else:
+                    track.cue_out = snapped
+                self._save_and_sync()
+                self.query_one("#track-info", TrackInfo).show_track(track)
+                self._set_status(
+                    f"Cue {sub}: {_fmt_time(current)} → {_fmt_time(snapped)} (snapped to {mode})"
+                )
+                return
+
+            # Time value mode
+            try:
+                val = parse_time(args[1])
+                self._checkpoint(f"Set cue {sub}")
+                if sub == "in":
+                    track.cue_in = val
+                else:
+                    track.cue_out = val
+                self._save_and_sync()
+                self.query_one("#track-info", TrackInfo).show_track(track)
+                self._set_status(f"Cue {sub}: {_fmt_time(val)}")
+            except ValueError:
+                self._set_status(f"Invalid time: {args[1]}. Use seconds or m:ss format")
+            return
+
+        self._set_status("cue: in|out <time> | in|out snap [bar|phrase] | now in|out | show")
 
     # ── EQ commands ──────────────────────────────────────────
 
@@ -1030,3 +1157,147 @@ class MixApp(App):
 
     def action_tab_info(self):
         self._switch_tab("tab-info")
+
+    def action_tab_zoom(self):
+        self._switch_tab("tab-zoom")
+
+    # ── Beat grid commands ──────────────────────────────────
+
+    def _handle_grid_cmd(self, args: list[str]):
+        """Handle :grid commands for beat grid manipulation.
+
+        Supported:
+            grid nudge <+/-ms>                        — shift beat grid by milliseconds
+            grid align <beat> <time>                  — shift grid so beat N lands at time
+            grid stretch <beatA> <timeA> <beatB> <timeB> — two-point anchor, recalculates BPM
+            grid info                                 — show beat grid stats
+        """
+        if self._selected_track_idx is None:
+            self._set_status("Select a track first")
+            return
+        track = self.project.library[self._selected_track_idx]
+        if not args:
+            self._set_status("grid: nudge <ms> | align | stretch | info")
+            return
+
+        sub = args[0]
+
+        if sub == "info":
+            if not track.beats:
+                self._set_status("No beat grid — run analyze first")
+                return
+            n_beats = len(track.beats)
+            n_bars = track.bars
+            first = track.beats[0]
+            last = track.beats[-1]
+            avg_interval = (last - first) / (n_beats - 1) if n_beats > 1 else 0
+            grid_bpm = 60.0 / avg_interval if avg_interval > 0 else 0
+            self._set_status(
+                f"Grid: {n_beats} beats, {n_bars} bars, "
+                f"first={_fmt_time(first)}, grid BPM≈{grid_bpm:.1f}"
+            )
+
+        elif sub == "nudge" and len(args) >= 2:
+            if not track.beats:
+                self._set_status("No beat grid — run analyze first")
+                return
+            try:
+                ms = float(args[1])
+                offset_sec = ms / 1000.0
+                self._checkpoint("Nudge beat grid")
+                track.nudge_grid(offset_sec)
+                self._save_and_sync()
+                self.query_one("#track-info", TrackInfo).show_track(track)
+                self._set_status(f"Grid nudged {ms:+.0f}ms")
+            except ValueError:
+                self._set_status("Usage: grid nudge <+/-milliseconds>")
+
+        elif sub == "align" and len(args) >= 3:
+            if not track.beats:
+                self._set_status("No beat grid — run analyze first")
+                return
+            try:
+                beat_idx = int(args[1])
+                target_time = parse_time(args[2])
+                if beat_idx < 0 or beat_idx >= len(track.beats):
+                    self._set_status(
+                        f"Beat index must be 0–{len(track.beats)-1}"
+                    )
+                    return
+                current_time = track.beats[beat_idx]
+                offset = target_time - current_time
+                self._checkpoint("Align beat grid")
+                track.nudge_grid(offset)
+                self._save_and_sync()
+                self.query_one("#track-info", TrackInfo).show_track(track)
+                self._set_status(
+                    f"Beat {beat_idx} aligned to {_fmt_time(target_time)} "
+                    f"(shifted {offset*1000:+.0f}ms)"
+                )
+            except ValueError:
+                self._set_status("Usage: grid align <beat_index> <time>")
+
+        elif sub == "stretch" and len(args) >= 5:
+            if not track.beats:
+                self._set_status("No beat grid — run analyze first")
+                return
+            try:
+                beat_a = int(args[1])
+                time_a = parse_time(args[2])
+                beat_b = int(args[3])
+                time_b = parse_time(args[4])
+                n = len(track.beats)
+                if not (0 <= beat_a < n and 0 <= beat_b < n):
+                    self._set_status(f"Beat indices must be 0–{n-1}")
+                    return
+                if beat_a == beat_b:
+                    self._set_status("Need two different beat indices")
+                    return
+                old_bpm = track.bpm
+                self._checkpoint("Stretch beat grid")
+                track.stretch_grid(beat_a, time_a, beat_b, time_b)
+                self._save_and_sync()
+                self.query_one("#track-info", TrackInfo).show_track(track)
+                self._set_status(
+                    f"Grid stretched: BPM {old_bpm} → {track.bpm} "
+                    f"(anchors: beat {beat_a}@{_fmt_time(time_a)}, "
+                    f"beat {beat_b}@{_fmt_time(time_b)})"
+                )
+            except ValueError:
+                self._set_status("Usage: grid stretch <beat1> <time1> <beat2> <time2>")
+
+        else:
+            self._set_status("grid: nudge <ms> | align | stretch | info")
+
+    # ── Zoom command ──────────────────────────────────────
+
+    def _handle_zoom_cmd(self, args: list[str]):
+        """Handle :zoom command — show transition detail view.
+
+        Supported:
+            zoom <pos>      — zoom into transition at timeline position
+            zoom clear      — close zoom view
+        """
+        if not args:
+            self._set_status("Usage: zoom <timeline_pos> | zoom clear")
+            return
+        if args[0] == "clear":
+            self.query_one("#transition-zoom", TransitionZoom).clear_zoom()
+            self._set_status("Zoom cleared")
+            return
+        try:
+            pos = int(args[0])
+        except ValueError:
+            self._set_status("Usage: zoom <timeline_pos>")
+            return
+        if pos < 0 or pos >= len(self.project.timeline) - 1:
+            self._set_status(f"No transition possible at position {pos}")
+            return
+        zoom = self.query_one("#transition-zoom", TransitionZoom)
+        zoom.show_transition(self.project, pos)
+        self._switch_tab("tab-zoom")
+        idx_a = self.project.timeline[pos]
+        idx_b = self.project.timeline[pos + 1]
+        a_title = self.project.library[idx_a].title if idx_a < len(self.project.library) else "?"
+        b_title = self.project.library[idx_b].title if idx_b < len(self.project.library) else "?"
+        self._set_status(f"Zoom: {a_title} → {b_title}")

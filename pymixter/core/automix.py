@@ -118,9 +118,9 @@ def pick_transition_type(a: Track, b: Track) -> tuple[str, int]:
     if key_ok and bpm_diff < 3:
         return "eq_fade", 32
 
-    # Compatible key → standard crossfade
+    # Compatible key, moderate BPM diff → filter sweep
     if key_ok:
-        return "crossfade", 16
+        return "filter_sweep", 16
 
     # Incompatible key → echo out to mask the clash
     return "echo_out", 8

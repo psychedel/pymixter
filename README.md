@@ -2,7 +2,7 @@
 
 > **Super early alpha** — expect breaking changes, missing features, and rough edges.
 
-Terminal-based DJ mix studio. Analyze tracks, build playlists, automix by key/BPM, play with real-time EQ — all from the terminal.
+Terminal-based AI DJ mix agent and studio. Analyze tracks, build playlists, automix by key/BPM, play with real-time EQ — all from the terminal.
 
 ![PyMixter TUI](docs/tui.png)
 
