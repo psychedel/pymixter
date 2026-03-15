@@ -218,11 +218,8 @@ class Player:
 
     # ── Transport ────────────────────────────────────────────
 
-    def play(self, path: str | None = None):
-        """Start or resume playback. Optionally load a new file first."""
-        if path:
-            self.load(path)
-
+    def play(self):
+        """Start or resume playback. Call load() first to load audio."""
         if self._samples is None:
             return
 

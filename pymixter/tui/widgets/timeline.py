@@ -7,6 +7,7 @@ from textual.events import Click
 from rich.text import Text
 
 from pymixter.core.project import Project, to_camelot
+from pymixter.tui.widgets.utils import resample as _resample
 
 
 _BLOCKS = " ▁▂▃▄▅▆▇"
@@ -178,18 +179,15 @@ class TimelineView(Static):
 
 def _mini_waveform(data: list[float], width: int, base_color: str) -> Text:
     """Render a mini waveform that fits inside a timeline block."""
-    n = len(data)
     text = Text()
-    peak = max(data) if data else 1.0
+    resampled = _resample(data, width)
+    peak = max(resampled) if resampled else 1.0
     if peak <= 0:
         peak = 1.0
 
-    for i in range(width):
-        src_start = int(i * n / width)
-        src_end = max(src_start + 1, int((i + 1) * n / width))
-        chunk = data[src_start:src_end]
-        val = (max(chunk) / peak) if chunk else 0.0
-        idx = min(int(val * (len(_BLOCKS) - 1)), len(_BLOCKS) - 1)
+    for val in resampled:
+        normalized = val / peak
+        idx = min(int(normalized * (len(_BLOCKS) - 1)), len(_BLOCKS) - 1)
         text.append(_BLOCKS[idx], style=base_color)
     return text
 

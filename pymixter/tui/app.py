@@ -167,88 +167,103 @@ class MixApp(App):
 
     def on_worker_state_changed(self, event: Worker.StateChanged):
         worker = event.worker
-        if worker.state != WorkerState.SUCCESS and worker.state != WorkerState.ERROR:
+        if worker.state not in (WorkerState.SUCCESS, WorkerState.ERROR):
             return
-        if worker.name == "render":
-            if worker.error:
-                self._set_status(f"Render error: {worker.error}")
-            else:
-                self._set_status(f"Rendered to {worker.result}")
-        elif worker.name in ("playmix", "preview_transition"):
-            if worker.error:
-                self._set_status(f"Playback error: {worker.error}")
-            else:
-                audio, sr = worker.result
-                if audio.shape[1] == 0:
-                    self._set_status("Nothing to play — rendered empty audio")
-                    return
-                self.player.load_audio(audio, sr, label=worker.name)
-                self.player.play()
-                duration = audio.shape[1] / sr
-                label = "transition" if "preview" in worker.name else "mix"
-                self._set_status(f">> Playing {label} ({_fmt_time(duration)})")
-        elif worker.name == "analyze":
-            if worker.error:
-                self._set_status(f"Analysis failed: {worker.error}")
-            else:
-                idx, analysis = worker.result
-                track = self.project.library[idx]
-                self._checkpoint("Analyze track")
-                track.bpm = analysis.get("bpm")
-                track.key = analysis.get("key")
-                track.duration = analysis.get("duration", 0)
-                track.beats = analysis.get("beats", [])
-                track.cue_in = analysis.get("cue_in")
-                track.cue_out = analysis.get("cue_out")
-                track.energy = analysis.get("energy", [])
-                track.waveform = analysis.get("waveform", [])
-                track.replay_gain = analysis.get("replay_gain")
-                track.lufs = analysis.get("lufs")
-                track.danceability = analysis.get("danceability")
-                track.dynamic_complexity = analysis.get("dynamic_complexity")
-                track.onsets = analysis.get("onsets", [])
-                track.fade_in_end = analysis.get("fade_in_end")
-                track.fade_out_start = analysis.get("fade_out_start")
-                track.chords = analysis.get("chords", [])
-                self._save_and_sync()
-                self._set_status(
-                    f"Analyzed: {track.title} — {track.bpm} BPM, {track.key}, "
-                    f"{track.bars} bars"
-                )
-                self.query_one("#track-info", TrackInfo).show_track(track)
-        elif worker.name == "scan":
-            if worker.error:
-                self._set_status(f"Scan failed: {worker.error}")
-            else:
-                files, directory = worker.result
-                if not files:
-                    self._set_status(f"No audio files found in {directory}")
-                else:
-                    self._checkpoint("Scan directory")
-                    for f in files:
-                        self.project.import_track(f)
-                    self._save_and_sync()
-                    self.query_one("#library", LibraryTable).focus()
-                    self._set_status(f"Imported {len(files)} tracks from {directory}")
-        elif worker.name == "stems":
-            if worker.error:
-                self._set_status(f"Stem separation failed: {worker.error}")
-            else:
-                idx, stems = worker.result
-                track = self.project.library[idx]
-                self._checkpoint("Stem separation")
-                track.stems = stems
-                self._save_and_sync()
-                self._set_status(
-                    f"Stems: {track.title} -> {', '.join(stems.keys())}"
-                )
-        elif worker.name == "deckb":
-            if worker.error:
-                self._set_status(f"Deck B error: {worker.error}")
-            else:
-                audio, sr, title = worker.result
-                self.player.load_deck_b_audio(audio, sr, label=title)
-                self._set_status(f"Deck B: {title}")
+        handler = {
+            "render": self._on_worker_render,
+            "playmix": self._on_worker_playback,
+            "preview_transition": self._on_worker_playback,
+            "analyze": self._on_worker_analyze,
+            "scan": self._on_worker_scan,
+            "stems": self._on_worker_stems,
+            "deckb": self._on_worker_deckb,
+        }.get(worker.name)
+        if handler:
+            handler(worker)
+
+    def _on_worker_render(self, worker: Worker):
+        if worker.error:
+            self._set_status(f"Render error: {worker.error}")
+        else:
+            self._set_status(f"Rendered to {worker.result}")
+
+    def _on_worker_playback(self, worker: Worker):
+        if worker.error:
+            self._set_status(f"Playback error: {worker.error}")
+            return
+        audio, sr = worker.result
+        if audio.shape[1] == 0:
+            self._set_status("Nothing to play — rendered empty audio")
+            return
+        self.player.load_audio(audio, sr, label=worker.name)
+        self.player.play()
+        duration = audio.shape[1] / sr
+        label = "transition" if "preview" in worker.name else "mix"
+        self._set_status(f">> Playing {label} ({_fmt_time(duration)})")
+
+    def _on_worker_analyze(self, worker: Worker):
+        if worker.error:
+            self._set_status(f"Analysis failed: {worker.error}")
+            return
+        idx, analysis = worker.result
+        track = self.project.library[idx]
+        self._checkpoint("Analyze track")
+        track.bpm = analysis.get("bpm")
+        track.key = analysis.get("key")
+        track.duration = analysis.get("duration", 0)
+        track.beats = analysis.get("beats", [])
+        track.cue_in = analysis.get("cue_in")
+        track.cue_out = analysis.get("cue_out")
+        track.energy = analysis.get("energy", [])
+        track.waveform = analysis.get("waveform", [])
+        track.replay_gain = analysis.get("replay_gain")
+        track.lufs = analysis.get("lufs")
+        track.danceability = analysis.get("danceability")
+        track.dynamic_complexity = analysis.get("dynamic_complexity")
+        track.onsets = analysis.get("onsets", [])
+        track.fade_in_end = analysis.get("fade_in_end")
+        track.fade_out_start = analysis.get("fade_out_start")
+        track.chords = analysis.get("chords", [])
+        self._save_and_sync()
+        self._set_status(
+            f"Analyzed: {track.title} — {track.bpm} BPM, {track.key}, "
+            f"{track.bars} bars"
+        )
+        self.query_one("#track-info", TrackInfo).show_track(track)
+
+    def _on_worker_scan(self, worker: Worker):
+        if worker.error:
+            self._set_status(f"Scan failed: {worker.error}")
+            return
+        files, directory = worker.result
+        if not files:
+            self._set_status(f"No audio files found in {directory}")
+            return
+        self._checkpoint("Scan directory")
+        for f in files:
+            self.project.import_track(f)
+        self._save_and_sync()
+        self.query_one("#library", LibraryTable).focus()
+        self._set_status(f"Imported {len(files)} tracks from {directory}")
+
+    def _on_worker_stems(self, worker: Worker):
+        if worker.error:
+            self._set_status(f"Stem separation failed: {worker.error}")
+            return
+        idx, stems = worker.result
+        track = self.project.library[idx]
+        self._checkpoint("Stem separation")
+        track.stems = stems
+        self._save_and_sync()
+        self._set_status(f"Stems: {track.title} -> {', '.join(stems.keys())}")
+
+    def _on_worker_deckb(self, worker: Worker):
+        if worker.error:
+            self._set_status(f"Deck B error: {worker.error}")
+            return
+        audio, sr, title = worker.result
+        self.player.load_deck_b_audio(audio, sr, label=title)
+        self._set_status(f"Deck B: {title}")
 
     def _check_for_changes(self):
         """Poll project file for external changes (e.g., from CLI)."""
@@ -364,60 +379,86 @@ class MixApp(App):
     def action_open_console(self):
         self.push_screen(CommandConsole(), self._handle_command)
 
+    # Map console verbs to (method_name, args_style)
+    # args_style: "none" = no args, "list" = pass args list, "join" = join args as string (with usage msg)
+    _COMMAND_DISPATCH: dict[str, tuple[str, str]] = {
+        "help": ("_cmd_help", "none"),
+        "save": ("action_save_project", "none"),
+        "suggest": ("_show_suggestions", "none"),
+        "stop": ("_cmd_stop", "none"),
+        "q": ("_cmd_quit", "none"),
+        "quit": ("_cmd_quit", "none"),
+        "info": ("_cmd_info", "none"),
+        "validate": ("_validate_mix", "none"),
+        "playmix": ("_play_mix", "none"),
+        "undo": ("action_undo", "none"),
+        "redo": ("action_redo", "none"),
+        "automix": ("_run_automix", "list"),
+        "timeline": ("_handle_timeline_cmd", "list"),
+        "transition": ("_handle_transition_cmd", "list"),
+        "cue": ("_handle_cue_cmd", "list"),
+        "eq": ("_handle_eq_cmd", "list"),
+        "render": ("_render_mix", "list"),
+        "export": ("_export_project", "list"),
+        "play": ("_cmd_play", "list"),
+        "seek": ("_cmd_seek", "list"),
+        "analyze": ("_cmd_analyze", "list"),
+        "gain": ("_cmd_gain", "list"),
+        "bpm": ("_handle_bpm_cmd", "list"),
+        "stems": ("_handle_stems_cmd", "list"),
+        "xfader": ("_cmd_crossfader", "list"),
+        "deckb": ("_cmd_deck_b", "list"),
+        "preview": ("_preview_transition", "list"),
+        "grid": ("_handle_grid_cmd", "list"),
+        "zoom": ("_handle_zoom_cmd", "list"),
+        "add": ("_import_file", "join:Usage: add <path>"),
+        "scan": ("_scan_directory", "join:Usage: scan <dir>"),
+        "import": ("_import_xml", "join:Usage: import <file>"),
+        "open": ("_open_project", "join:Usage: open <file>"),
+    }
+
+    def _cmd_help(self):
+        self._set_status(
+            "add scan analyze automix timeline transition cue grid zoom eq gain bpm "
+            "stems xfader deckb preview render validate playmix export import undo redo"
+        )
+
+    def _cmd_stop(self):
+        self.player.stop()
+        self._set_status("Stopped")
+
+    def _cmd_quit(self):
+        self.exit()
+
+    def _cmd_info(self):
+        self._set_status(
+            f"{self.project.name}: {len(self.project.library)} tracks, "
+            f"{len(self.project.timeline)} in timeline"
+        )
+
     def _handle_command(self, cmd: str | None):
         if not cmd:
             return
         parts = cmd.split()
         verb, args = parts[0].lower(), parts[1:]
 
-        # Commands that take no args or handle args internally
-        dispatch = {
-            "help": lambda: self._set_status(
-                "add scan analyze automix timeline transition cue grid zoom eq gain bpm "
-                "stems xfader deckb preview render validate playmix export import undo redo"
-            ),
-            "save": lambda: self.action_save_project(),
-            "suggest": lambda: self._show_suggestions(),
-            "stop": lambda: (self.player.stop(), self._set_status("Stopped")),
-            "q": lambda: self.exit(),
-            "quit": lambda: self.exit(),
-            "info": lambda: self._set_status(
-                f"{self.project.name}: {len(self.project.library)} tracks, "
-                f"{len(self.project.timeline)} in timeline"
-            ),
-            "automix": lambda: self._run_automix(args),
-            "timeline": lambda: self._handle_timeline_cmd(args),
-            "transition": lambda: self._handle_transition_cmd(args),
-            "cue": lambda: self._handle_cue_cmd(args),
-            "eq": lambda: self._handle_eq_cmd(args),
-            "undo": lambda: self.action_undo(),
-            "redo": lambda: self.action_redo(),
-            "render": lambda: self._render_mix(args),
-            "validate": lambda: self._validate_mix(),
-            "playmix": lambda: self._play_mix(),
-            "export": lambda: self._export_project(args),
-            "play": lambda: self._cmd_play(args),
-            "seek": lambda: self._cmd_seek(args),
-            "analyze": lambda: self._cmd_analyze(args),
-            "add": lambda: self._import_file(" ".join(args)) if args else self._set_status("Usage: add <path>"),
-            "scan": lambda: self._scan_directory(" ".join(args)) if args else self._set_status("Usage: scan <dir>"),
-            "gain": lambda: self._cmd_gain(args),
-            "import": lambda: self._import_xml(" ".join(args)) if args else self._set_status("Usage: import <file>"),
-            "open": lambda: self._open_project(" ".join(args)) if args else self._set_status("Usage: open <file>"),
-            "bpm": lambda: self._handle_bpm_cmd(args),
-            "stems": lambda: self._handle_stems_cmd(args),
-            "xfader": lambda: self._cmd_crossfader(args),
-            "deckb": lambda: self._cmd_deck_b(args),
-            "preview": lambda: self._preview_transition(args),
-            "grid": lambda: self._handle_grid_cmd(args),
-            "zoom": lambda: self._handle_zoom_cmd(args),
-        }
-
-        handler = dispatch.get(verb)
-        if handler:
-            handler()
-        else:
+        entry = self._COMMAND_DISPATCH.get(verb)
+        if not entry:
             self._set_status(f"Unknown: {verb}. Type :help")
+            return
+
+        method_name, args_style = entry
+        method = getattr(self, method_name)
+        if args_style == "none":
+            method()
+        elif args_style == "list":
+            method(args)
+        elif args_style.startswith("join:"):
+            usage = args_style[5:]
+            if args:
+                method(" ".join(args))
+            else:
+                self._set_status(usage)
 
     def _cmd_play(self, args: list[str]):
         if args:

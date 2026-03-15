@@ -214,7 +214,8 @@ def cmd_play(args):
 
     print(f"Playing: {track.title} ({track.bpm or '?'} BPM, {track.key or '?'})")
     print("Press Ctrl-C to stop")
-    player.play(track.path)
+    player.load(track.path, replay_gain_db=track.replay_gain)
+    player.play()
 
     # Block until playback finishes
     import time

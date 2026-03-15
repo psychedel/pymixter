@@ -76,9 +76,8 @@ class TransitionZoom(Static, can_focus=True):
             return
         track_a, _, idx_a, _ = pair
         current = track_a.cue_out or track_a.duration or 0
-        track_a.cue_out = max(0, round(current + delta, 3))
-        self.post_message(self.CueChanged(idx_a, cue_in=None, cue_out=track_a.cue_out))
-        self.refresh(layout=True)
+        new_val = max(0, round(current + delta, 3))
+        self.post_message(self.CueChanged(idx_a, cue_in=None, cue_out=new_val))
 
     def action_nudge_b(self, delta: float) -> None:
         pair = self._get_tracks()
@@ -86,9 +85,8 @@ class TransitionZoom(Static, can_focus=True):
             return
         _, track_b, _, idx_b = pair
         current = track_b.cue_in or 0
-        track_b.cue_in = max(0, round(current + delta, 3))
-        self.post_message(self.CueChanged(idx_b, cue_in=track_b.cue_in, cue_out=None))
-        self.refresh(layout=True)
+        new_val = max(0, round(current + delta, 3))
+        self.post_message(self.CueChanged(idx_b, cue_in=new_val, cue_out=None))
 
     def action_snap_a(self) -> None:
         pair = self._get_tracks()
@@ -99,9 +97,7 @@ class TransitionZoom(Static, can_focus=True):
             return
         current = track_a.cue_out or track_a.duration or 0
         snapped = track_a.snap_to_beat(current)
-        track_a.cue_out = snapped
         self.post_message(self.CueChanged(idx_a, cue_in=None, cue_out=snapped))
-        self.refresh(layout=True)
 
     def action_snap_b(self) -> None:
         pair = self._get_tracks()
@@ -112,9 +108,7 @@ class TransitionZoom(Static, can_focus=True):
             return
         current = track_b.cue_in or 0
         snapped = track_b.snap_to_beat(current)
-        track_b.cue_in = snapped
         self.post_message(self.CueChanged(idx_b, cue_in=snapped, cue_out=None))
-        self.refresh(layout=True)
 
     def render(self):
         if not self._project or self._position is None:
