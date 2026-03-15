@@ -326,6 +326,68 @@ def render_to_file(project: Project, output_path: str,
     return str(out)
 
 
+def render_transition_preview(project: Project, pos: int,
+                              context_seconds: float = 10.0,
+                              ) -> tuple[np.ndarray, int]:
+    """Render just the transition zone between timeline[pos] and timeline[pos+1].
+
+    Includes context_seconds of solo audio on each side of the transition
+    so the DJ can hear the approach and exit.
+
+    Returns (audio, sample_rate).
+    """
+    if pos < 0 or pos >= len(project.timeline) - 1:
+        raise IndexError(f"No transition at position {pos}")
+
+    tr_lookup = {tr.from_track: tr for tr in project.transitions}
+    tr = tr_lookup.get(pos)
+
+    track_a = project.library[project.timeline[pos]]
+    track_b = project.library[project.timeline[pos + 1]]
+
+    audio_a, sr_a = _load_track_audio(track_a)
+    audio_b, sr_b = _load_track_audio(track_b)
+    sr = sr_a
+
+    if tr is None:
+        # No transition defined — just play last N seconds of A + first N of B
+        ctx_frames = int(context_seconds * sr)
+        tail = audio_a[:, max(0, audio_a.shape[1] - ctx_frames):]
+        head = audio_b[:, :min(ctx_frames, audio_b.shape[1])]
+        return np.concatenate([tail, head], axis=1), sr
+
+    overlap_frames = _transition_frames(tr, track_a, sr)
+    overlap_frames = min(overlap_frames, audio_a.shape[1], audio_b.shape[1])
+
+    solo_end = audio_a.shape[1] - overlap_frames
+    if tr.beat_aligned and track_a.beats:
+        solo_end = _snap_to_beat(solo_end, track_a.beats, sr, "before")
+        overlap_frames = audio_a.shape[1] - solo_end
+
+    a_tail = audio_a[:, solo_end:]
+    b_head = audio_b[:, :overlap_frames]
+
+    if tr.tempo_sync and track_a.bpm and track_b.bpm and tr.type != "cut":
+        b_head = _tempo_match(b_head, track_b.bpm, track_a.bpm, sr)
+        min_len = min(a_tail.shape[1], b_head.shape[1])
+        a_tail = a_tail[:, :min_len]
+        b_head = b_head[:, :min_len]
+
+    renderer = TRANSITION_RENDERERS.get(tr.type, render_crossfade)
+    transition_audio = renderer(a_tail, b_head, sr)
+
+    # Add context before and after the transition
+    ctx_frames = int(context_seconds * sr)
+    pre_start = max(0, solo_end - ctx_frames)
+    pre_context = audio_a[:, pre_start:solo_end]
+
+    post_end = min(overlap_frames + ctx_frames, audio_b.shape[1])
+    post_context = audio_b[:, overlap_frames:post_end]
+
+    parts = [pre_context, transition_audio, post_context]
+    return np.concatenate(parts, axis=1), sr
+
+
 def validate_timeline(project: Project) -> list[str]:
     """Check timeline for issues. Returns list of warning messages."""
     warnings = []

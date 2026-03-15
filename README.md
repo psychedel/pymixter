@@ -41,7 +41,11 @@ uv run python main.py cli export         # export to Rekordbox XML
 
 ## Console commands (`:`)
 
-`add <file>` `scan <dir>` `analyze [idx]` `automix` `render [output.wav]` `validate` `playmix` `export` `import <file.xml>` `open <file>` `suggest` `save` `help`
+`add <file>` `scan <dir>` `analyze [idx]` `automix` `render [output.wav]` `validate` `playmix` `preview <pos>` `export` `import <file.xml>` `open <file>` `suggest` `save` `help`
+
+### Mixing
+
+`deckb <idx>` `xfader <0-1>` `eq low|mid|high <dB>` `gain <dB>` `bpm set|halve|double|nudge|key` `stems [idx]` `cue in|out <sec>`
 
 ## Using with Claude Code
 

@@ -19,7 +19,10 @@ from pymixter.core.analysis import analyze_track
 from pymixter.core.automix import automix
 from pymixter.core.player import Player, PlayerState
 from pymixter.core.recent import get_recent, add_recent
-from pymixter.core.mixer import render_timeline, render_to_file, validate_timeline
+from pymixter.core.mixer import (
+    render_timeline, render_to_file, validate_timeline,
+    render_transition_preview,
+)
 from pymixter.core.history import History
 from pymixter.tui.widgets.library import LibraryTable
 from pymixter.tui.widgets.timeline import TimelineView
@@ -113,10 +116,12 @@ class MixApp(App):
             self.project.save()
         add_recent(self.project_path)
 
-    def _save_and_sync(self, description: str = ""):
-        """Save project and update version tracker."""
-        if description:
-            self.history.checkpoint(self.project, description)
+    def _checkpoint(self, description: str):
+        """Capture current project state for undo BEFORE a mutation."""
+        self.history.checkpoint(self.project, description)
+
+    def _save_and_sync(self):
+        """Save project and update version tracker (call AFTER mutation)."""
         self.project.save()
         self._last_version = self.project.get_version()
         self._refresh_all()
@@ -160,18 +165,73 @@ class MixApp(App):
                 self._set_status(f"Render error: {worker.error}")
             else:
                 self._set_status(f"Rendered to {worker.result}")
-        elif worker.name == "playmix":
+        elif worker.name in ("playmix", "preview_transition"):
             if worker.error:
-                self._set_status(f"Mix playback error: {worker.error}")
+                self._set_status(f"Playback error: {worker.error}")
             else:
                 audio, sr = worker.result
                 if audio.shape[1] == 0:
                     self._set_status("Nothing to play — rendered empty audio")
                     return
-                self.player.load_audio(audio, sr, label="mix")
+                self.player.load_audio(audio, sr, label=worker.name)
                 self.player.play()
                 duration = audio.shape[1] / sr
-                self._set_status(f">> Playing mix ({_fmt_time(duration)})")
+                label = "transition" if "preview" in worker.name else "mix"
+                self._set_status(f">> Playing {label} ({_fmt_time(duration)})")
+        elif worker.name == "analyze":
+            if worker.error:
+                self._set_status(f"Analysis failed: {worker.error}")
+            else:
+                idx, analysis = worker.result
+                track = self.project.library[idx]
+                self._checkpoint("Analyze track")
+                track.bpm = analysis.get("bpm")
+                track.key = analysis.get("key")
+                track.duration = analysis.get("duration", 0)
+                track.beats = analysis.get("beats", [])
+                track.cue_in = analysis.get("cue_in")
+                track.cue_out = analysis.get("cue_out")
+                track.energy = analysis.get("energy", [])
+                track.waveform = analysis.get("_waveform", [])
+                self._save_and_sync()
+                self._set_status(
+                    f"Analyzed: {track.title} — {track.bpm} BPM, {track.key}, "
+                    f"{track.bars} bars"
+                )
+                self.query_one("#track-info", TrackInfo).show_track(track)
+        elif worker.name == "scan":
+            if worker.error:
+                self._set_status(f"Scan failed: {worker.error}")
+            else:
+                files, directory = worker.result
+                if not files:
+                    self._set_status(f"No audio files found in {directory}")
+                else:
+                    self._checkpoint("Scan directory")
+                    for f in files:
+                        self.project.import_track(f)
+                    self._save_and_sync()
+                    self._switch_tab("tab-library")
+                    self._set_status(f"Imported {len(files)} tracks from {directory}")
+        elif worker.name == "stems":
+            if worker.error:
+                self._set_status(f"Stem separation failed: {worker.error}")
+            else:
+                idx, stems = worker.result
+                track = self.project.library[idx]
+                self._checkpoint("Stem separation")
+                track.stems = stems
+                self._save_and_sync()
+                self._set_status(
+                    f"Stems: {track.title} -> {', '.join(stems.keys())}"
+                )
+        elif worker.name == "deckb":
+            if worker.error:
+                self._set_status(f"Deck B error: {worker.error}")
+            else:
+                audio, sr, title = worker.result
+                self.player.load_deck_b_audio(audio, sr, label=title)
+                self._set_status(f"Deck B: {title}")
 
     def _check_for_changes(self):
         """Poll project file for external changes (e.g., from CLI)."""
@@ -274,7 +334,8 @@ class MixApp(App):
         # Commands that take no args or handle args internally
         dispatch = {
             "help": lambda: self._set_status(
-                "add scan analyze automix timeline transition cue eq gain render validate playmix export import undo redo"
+                "add scan analyze automix timeline transition cue eq gain bpm stems "
+                "xfader deckb preview render validate playmix export import undo redo"
             ),
             "save": lambda: self.action_save_project(),
             "suggest": lambda: self._show_suggestions(),
@@ -304,6 +365,11 @@ class MixApp(App):
             "gain": lambda: self._cmd_gain(args),
             "import": lambda: self._import_xml(" ".join(args)) if args else self._set_status("Usage: import <file>"),
             "open": lambda: self._open_project(" ".join(args)) if args else self._set_status("Usage: open <file>"),
+            "bpm": lambda: self._handle_bpm_cmd(args),
+            "stems": lambda: self._handle_stems_cmd(args),
+            "xfader": lambda: self._cmd_crossfader(args),
+            "deckb": lambda: self._cmd_deck_b(args),
+            "preview": lambda: self._preview_transition(args),
         }
 
         handler = dispatch.get(verb)
@@ -313,7 +379,14 @@ class MixApp(App):
             self._set_status(f"Unknown: {verb}. Type :help")
 
     def _cmd_play(self, args: list[str]):
-        idx = int(args[0]) if args else self._selected_track_idx
+        if args:
+            try:
+                idx = int(args[0])
+            except ValueError:
+                self._set_status("Usage: play [index]")
+                return
+        else:
+            idx = self._selected_track_idx
         if idx is not None:
             self._play_track(idx)
         else:
@@ -329,7 +402,14 @@ class MixApp(App):
             self._set_status("Usage: seek <seconds>")
 
     def _cmd_analyze(self, args: list[str]):
-        idx = int(args[0]) if args else self._selected_track_idx
+        if args:
+            try:
+                idx = int(args[0])
+            except ValueError:
+                self._set_status("Usage: analyze [index]")
+                return
+        else:
+            idx = self._selected_track_idx
         if idx is not None:
             self._analyze_track(idx)
         else:
@@ -364,8 +444,9 @@ class MixApp(App):
 
     def _import_file(self, path: str):
         try:
+            self._checkpoint("Import track")
             track = self.project.import_track(path)
-            self._save_and_sync("Import track")
+            self._save_and_sync()
             self._set_status(f"Imported: {track.title}")
             self._switch_tab("tab-library")
         except FileNotFoundError:
@@ -374,39 +455,33 @@ class MixApp(App):
             self._set_status(f"Error: {e}")
 
     def _scan_directory(self, directory: str):
-        files = find_audio_files(directory)
-        if not files:
-            self._set_status(f"No audio files in {directory}")
-            return
-        for f in files:
-            self.project.import_track(str(f))
-        self._save_and_sync("Scan directory")
-        self._set_status(f"Imported {len(files)} tracks from {Path(directory).name}/")
-        self._switch_tab("tab-library")
+        """Scan and import audio files (non-blocking).
+
+        Worker only finds files; actual import happens on main thread
+        in on_worker_state_changed to avoid mutating project from a thread.
+        """
+        self._set_status(f"Scanning {directory}...")
+
+        def _do_scan():
+            files = find_audio_files(directory)
+            return [str(f) for f in files], directory
+
+        self.run_worker(_do_scan, thread=True, exit_on_error=False,
+                        name="scan", exclusive=True, group="scan")
 
     def _analyze_track(self, idx: int):
+        """Run track analysis in background worker."""
         if idx >= len(self.project.library):
             self._set_status(f"Track index {idx} out of range")
             return
         track = self.project.library[idx]
         self._set_status(f"Analyzing {track.title}...")
-        try:
-            analysis = analyze_track(track.path, full=True)
-            track.bpm = analysis.get("bpm")
-            track.key = analysis.get("key")
-            track.duration = analysis.get("duration", 0)
-            track.beats = analysis.get("beats", [])
-            track.cue_in = analysis.get("cue_in")
-            track.cue_out = analysis.get("cue_out")
-            track.energy = analysis.get("energy", [])
-            track.waveform = analysis.get("_waveform", [])
-            self._save_and_sync("Analyze track")
-            bars = track.bars
-            self._set_status(
-                f"Analyzed: {track.title} — {track.bpm} BPM, {track.key}, {bars} bars"
-            )
-        except Exception as e:
-            self._set_status(f"Analysis failed: {e}")
+
+        def _do_analyze():
+            return idx, analyze_track(track.path, full=True)
+
+        self.run_worker(_do_analyze, thread=True, exit_on_error=False,
+                        name="analyze", exclusive=True, group="analyze")
 
     def _run_automix(self, args: list[str]):
         track_indices = None
@@ -423,12 +498,13 @@ class MixApp(App):
             except ValueError:
                 pass
 
+        self._checkpoint("Automix")
         order = automix(self.project, track_indices=track_indices,
                         start_idx=start_idx)
         if not order:
             self._set_status("No analyzed tracks — run analyze first")
             return
-        self._save_and_sync("Automix")
+        self._save_and_sync()
         self._switch_tab("tab-timeline")
         n_tr = len(self.project.transitions)
         self._set_status(
@@ -507,10 +583,11 @@ class MixApp(App):
     def _import_xml(self, path: str):
         from pymixter.core.rekordbox_xml import import_rekordbox_xml
         try:
+            self._checkpoint("Import XML")
             before = len(self.project.library)
             import_rekordbox_xml(path, self.project)
             added = len(self.project.library) - before
-            self._save_and_sync("Import XML")
+            self._save_and_sync()
             self._set_status(f"Imported {added} tracks from XML")
         except Exception as e:
             self._set_status(f"Import error: {e}")
@@ -519,9 +596,10 @@ class MixApp(App):
         try:
             if path.endswith(".xml"):
                 from pymixter.core.rekordbox_xml import import_rekordbox_xml
+                self._checkpoint("Open XML")
                 self.project = import_rekordbox_xml(path)
                 self.project._path = self.project_path
-                self._save_and_sync("Open XML")
+                self._save_and_sync()
                 self._set_status(
                     f"Opened XML: {len(self.project.library)} tracks"
                 )
@@ -603,22 +681,25 @@ class MixApp(App):
         sub = args[0]
         if sub == "append" and len(args) >= 2:
             try:
+                self._checkpoint("Add to timeline")
                 self.project.append_to_timeline(int(args[1]))
-                self._save_and_sync("Add to timeline")
+                self._save_and_sync()
                 self._set_status(f"Added [{args[1]}] to timeline")
             except (ValueError, IndexError) as e:
                 self._set_status(f"Error: {e}")
         elif sub == "move" and len(args) >= 3:
             try:
+                self._checkpoint("Move timeline track")
                 self.project.move_timeline_track(int(args[1]), int(args[2]))
-                self._save_and_sync("Move timeline track")
+                self._save_and_sync()
                 self._set_status(f"Moved {args[1]} -> {args[2]}")
             except (ValueError, IndexError) as e:
                 self._set_status(f"Error: {e}")
         elif sub == "remove" and len(args) >= 2:
             try:
+                self._checkpoint("Remove from timeline")
                 self.project.remove_from_timeline(int(args[1]))
-                self._save_and_sync("Remove from timeline")
+                self._save_and_sync()
                 self._set_status(f"Removed position {args[1]}")
             except (ValueError, IndexError) as e:
                 self._set_status(f"Error: {e}")
@@ -645,8 +726,9 @@ class MixApp(App):
                 pos = int(args[1])
                 tr_type = args[2] if len(args) > 2 else "crossfade"
                 bars = int(args[3]) if len(args) > 3 else 16
+                self._checkpoint("Edit transition")
                 self.project.set_transition(pos, tr_type, bars)
-                self._save_and_sync("Edit transition")
+                self._save_and_sync()
                 self._set_status(f"Transition [{pos}]: {tr_type} {bars}b")
             except (ValueError, IndexError) as e:
                 self._set_status(f"Error: {e}")
@@ -660,10 +742,11 @@ class MixApp(App):
         elif sub == "remove" and len(args) >= 2:
             try:
                 pos = int(args[1])
+                self._checkpoint("Remove transition")
                 self.project.transitions = [
                     t for t in self.project.transitions if t.from_track != pos
                 ]
-                self._save_and_sync("Remove transition")
+                self._save_and_sync()
                 self._set_status(f"Removed transition at [{pos}]")
             except ValueError:
                 self._set_status("Usage: transition remove <pos>")
@@ -684,12 +767,14 @@ class MixApp(App):
         try:
             val = float(args[1])
             if args[0] == "in":
+                self._checkpoint("Set cue in")
                 track.cue_in = val
-                self._save_and_sync("Set cue in")
+                self._save_and_sync()
                 self._set_status(f"Cue in: {_fmt_time(val)}")
             elif args[0] == "out":
+                self._checkpoint("Set cue out")
                 track.cue_out = val
-                self._save_and_sync("Set cue out")
+                self._save_and_sync()
                 self._set_status(f"Cue out: {_fmt_time(val)}")
             else:
                 self._set_status("cue: in <sec> | out <sec>")
@@ -721,12 +806,190 @@ class MixApp(App):
         else:
             self._set_status("eq: low|mid|high <dB> | reset")
 
+    # ── BPM / beat grid editing ──────────────────────────────
+
+    def _handle_bpm_cmd(self, args: list[str]):
+        """Handle :bpm set/halve/double/tap/nudge commands."""
+        if self._selected_track_idx is None:
+            self._set_status("Select a track first")
+            return
+        track = self.project.library[self._selected_track_idx]
+        if not args:
+            self._set_status(
+                f"BPM: {track.bpm or '?'} | bpm set <val> | halve | double | "
+                f"nudge <+/-0.1>"
+            )
+            return
+        sub = args[0]
+        idx = self._selected_track_idx
+        if sub == "set" and len(args) >= 2:
+            try:
+                new_bpm = float(args[1])
+                if new_bpm < 30 or new_bpm > 300:
+                    self._set_status("BPM must be 30–300")
+                    return
+                old_bpm = track.bpm
+                self._checkpoint("Set BPM")
+                self.project.set_bpm(idx, new_bpm)
+                self._save_and_sync()
+                self._set_status(f"BPM: {old_bpm} -> {track.bpm}")
+            except ValueError:
+                self._set_status("Usage: bpm set <value>")
+        elif sub == "halve":
+            if track.bpm:
+                old = track.bpm
+                self._checkpoint("Halve BPM")
+                self.project.set_bpm(idx, track.bpm / 2)
+                self._save_and_sync()
+                self._set_status(f"BPM: {old} -> {track.bpm}")
+            else:
+                self._set_status("No BPM — analyze first")
+        elif sub == "double":
+            if track.bpm:
+                old = track.bpm
+                self._checkpoint("Double BPM")
+                self.project.set_bpm(idx, track.bpm * 2)
+                self._save_and_sync()
+                self._set_status(f"BPM: {old} -> {track.bpm}")
+            else:
+                self._set_status("No BPM — analyze first")
+        elif sub == "nudge" and len(args) >= 2:
+            try:
+                delta = float(args[1])
+                if track.bpm:
+                    old = track.bpm
+                    self._checkpoint("Nudge BPM")
+                    self.project.set_bpm(idx, track.bpm + delta)
+                    self._save_and_sync()
+                    self._set_status(f"BPM: {old} -> {track.bpm}")
+                else:
+                    self._set_status("No BPM — analyze first")
+            except ValueError:
+                self._set_status("Usage: bpm nudge <delta>")
+        elif sub == "key" and len(args) >= 2:
+            self._checkpoint("Set key")
+            track.key = args[1]
+            self._save_and_sync()
+            self._set_status(f"Key: {track.key}")
+        else:
+            self._set_status("bpm: set <val> | halve | double | nudge <d> | key <K>")
+
+    # ── Stem separation ──────────────────────────────────────
+
+    def _handle_stems_cmd(self, args: list[str]):
+        """Handle :stems [index] [force] command — separate track into stems."""
+        force = "force" in args
+        # Parse index from first numeric arg
+        idx = self._selected_track_idx
+        for a in args:
+            try:
+                idx = int(a)
+                break
+            except ValueError:
+                continue
+        if idx is None:
+            self._set_status("Usage: stems [index] [force]")
+            return
+        if idx >= len(self.project.library):
+            self._set_status(f"Track index {idx} out of range")
+            return
+        track = self.project.library[idx]
+        if track.stems and not force:
+            self._set_status(
+                f"Stems already exist: {', '.join(track.stems.keys())}. "
+                "Use :stems force to redo"
+            )
+            return
+
+        stems_dir = str(self.project.project_dir / "stems" / Path(track.path).stem)
+        self._set_status(f"Separating stems for {track.title}...")
+
+        def _do_separate():
+            from pymixter.core.stems import separate_track
+            stems = separate_track(
+                track.path, stems_dir,
+                on_progress=lambda msg: self.call_from_thread(
+                    self._set_status, msg
+                ),
+            )
+            return idx, stems
+
+        self.run_worker(_do_separate, thread=True, exit_on_error=False,
+                        name="stems", exclusive=True, group="stems")
+
+    # ── Crossfader / Deck B ──────────────────────────────────
+
+    def _cmd_crossfader(self, args: list[str]):
+        """Handle :xfader <0.0-1.0> command."""
+        if not args:
+            self._set_status(f"Crossfader: {self.player.crossfader:.2f} (0=A, 1=B)")
+            return
+        try:
+            val = float(args[0])
+            self.player.set_crossfader(val)
+            self._set_status(f"Crossfader: {self.player.crossfader:.2f}")
+        except ValueError:
+            self._set_status("Usage: xfader <0.0-1.0>")
+
+    def _cmd_deck_b(self, args: list[str]):
+        """Handle :deckb <index> — load track into deck B (non-blocking)."""
+        if not args:
+            self._set_status("Usage: deckb <track_index>")
+            return
+        try:
+            idx = int(args[0])
+        except ValueError:
+            self._set_status("Usage: deckb <track_index>")
+            return
+        if idx >= len(self.project.library):
+            self._set_status(f"Track index {idx} out of range")
+            return
+        track = self.project.library[idx]
+        path = track.path
+        title = track.title
+        self._set_status(f"Loading deck B: {title}...")
+
+        def _do_load():
+            from pedalboard.io import AudioFile
+            with AudioFile(path) as f:
+                data = f.read(f.frames)
+                sr = f.samplerate
+            return data, sr, title
+
+        self.run_worker(_do_load, thread=True, exit_on_error=False,
+                        name="deckb", exclusive=True, group="deckb")
+
+    # ── Transition preview ────────────────────────────────────
+
+    def _preview_transition(self, args: list[str]):
+        """Render and play just the transition zone (non-blocking)."""
+        if not args:
+            self._set_status("Usage: preview <timeline_pos>")
+            return
+        try:
+            pos = int(args[0])
+        except ValueError:
+            self._set_status("Usage: preview <timeline_pos>")
+            return
+        if pos < 0 or pos >= len(self.project.timeline) - 1:
+            self._set_status(f"No transition at position {pos}")
+            return
+
+        self._set_status(f"Rendering transition preview [{pos}]...")
+
+        def _do_preview():
+            return render_transition_preview(self.project, pos)
+
+        self.run_worker(_do_preview, thread=True, exit_on_error=False,
+                        name="preview_transition", exclusive=True, group="render")
+
     def action_add_to_timeline(self):
         if self._selected_track_idx is None:
             self._set_status("No track selected")
             return
+        self._checkpoint("Add to timeline")
         self.project.append_to_timeline(self._selected_track_idx)
-        self._save_and_sync("Add to timeline")
+        self._save_and_sync()
         self._set_status(f"Added track [{self._selected_track_idx}] to timeline")
 
     def action_reload_project(self):

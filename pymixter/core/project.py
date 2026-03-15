@@ -128,6 +128,15 @@ class Project:
         proj._version = data.get("version", 0)
         return proj
 
+    def set_bpm(self, track_index: int, new_bpm: float):
+        """Set BPM and proportionally rescale beat grid."""
+        track = self.library[track_index]
+        old_bpm = track.bpm
+        track.bpm = round(new_bpm, 1)
+        if track.beats and old_bpm and old_bpm > 0:
+            ratio = old_bpm / new_bpm
+            track.beats = [round(b * ratio, 4) for b in track.beats]
+
     def add_track(self, path: str, **analysis) -> Track:
         track = Track(path=path, **analysis)
         self.library.append(track)

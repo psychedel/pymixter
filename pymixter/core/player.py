@@ -14,10 +14,8 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 from pedalboard import (
-    Pedalboard, Gain, Compressor, Limiter,
+    Pedalboard, Gain, Limiter,
     LowShelfFilter, HighShelfFilter, PeakFilter,
-    HighpassFilter, LowpassFilter, LadderFilter,
-    PitchShift, Delay, Reverb, Chorus,
 )
 from pedalboard.io import AudioFile
 
@@ -104,6 +102,12 @@ class Player:
 
         # Loaded file info
         self._current_path: str | None = None
+
+        # Deck B audio data
+        self._samples_b: np.ndarray | None = None
+        self._sr_b: int = 44100
+        self._position_b: int = 0
+        self._total_frames_b: int = 0
 
         # Decks & master
         self.deck_a = Deck()
@@ -273,18 +277,63 @@ class Player:
                 outdata[:] = processed.T
                 self._position = end
 
+    # ── Deck B ────────────────────────────────────────────────
+
+    def load_deck_b(self, path: str):
+        """Load audio file into deck B for crossfader mixing."""
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"Audio file not found: {path}")
+        with AudioFile(str(p)) as f:
+            data = f.read(f.frames)
+            sr = f.samplerate
+        with self._lock:
+            self._samples_b = data
+            self._sr_b = sr
+            self._position_b = 0
+            self._total_frames_b = data.shape[1]
+        log.info("Loaded deck B: %s", p.name)
+
+    def load_deck_b_audio(self, audio: np.ndarray, sr: int, label: str = ""):
+        """Load pre-rendered audio into deck B."""
+        with self._lock:
+            self._samples_b = audio
+            self._sr_b = sr
+            self._position_b = 0
+            self._total_frames_b = audio.shape[1]
+
+    def set_crossfader(self, value: float):
+        """Set crossfader position: 0.0 = full A, 1.0 = full B."""
+        self.crossfader = max(0.0, min(1.0, value))
+
     def _process_audio(self, chunk: np.ndarray) -> np.ndarray:
-        """Process audio chunk through deck A effects + master chain.
+        """Process audio through deck(s) + master chain.
 
-        Args:
-            chunk: audio in channels-first format (channels, frames)
-
-        Returns:
-            Processed audio in channels-first format.
+        When crossfader is at 0.0 (default), only deck A plays.
+        When deck B has audio loaded and crossfader > 0, both decks mix.
         """
-        # Process through deck A
-        out = self.deck_a.process(chunk, self._sr)
-        # Master chain (gain + limiter)
+        out_a = self.deck_a.process(chunk, self._sr)
+
+        if self._samples_b is not None and self.crossfader > 0.001:
+            # Get matching chunk from deck B
+            end_b = self._position_b + chunk.shape[1]
+            if end_b <= self._total_frames_b:
+                chunk_b = self._samples_b[:, self._position_b:end_b]
+                self._position_b = end_b
+            else:
+                remaining = self._total_frames_b - self._position_b
+                chunk_b = np.zeros_like(chunk)
+                if remaining > 0:
+                    chunk_b[:, :remaining] = self._samples_b[:, self._position_b:]
+                self._position_b = self._total_frames_b
+
+            out_b = self.deck_b.process(chunk_b, self._sr)
+            # Crossfader mix
+            cf = self.crossfader
+            out = out_a * (1.0 - cf) + out_b * cf
+        else:
+            out = out_a
+
         out = self._master_board(out, self._sr, reset=False)
         return out
 
@@ -312,6 +361,7 @@ class Player:
         self._stop_stream()
         with self._lock:
             self._samples = None
+            self._samples_b = None
             self._state = PlayerState.STOPPED
 
     def __del__(self):

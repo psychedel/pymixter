@@ -421,6 +421,93 @@ def cmd_open(args):
         print(f"Unknown format: {path} (use .json or .xml)")
 
 
+def cmd_bpm(args):
+    """Set or adjust BPM for a track."""
+    proj = get_project(args.project)
+    idx = args.index
+    if idx >= len(proj.library):
+        print(f"Track index {idx} out of range", file=sys.stderr)
+        sys.exit(1)
+    track = proj.library[idx]
+
+    if args.value is not None:
+        old_bpm = track.bpm
+        proj.set_bpm(idx, args.value)
+        proj.save()
+        print(f"BPM [{idx}] {track.title}: {old_bpm} -> {track.bpm}")
+    elif args.halve:
+        if track.bpm:
+            proj.set_bpm(idx, track.bpm / 2)
+            proj.save()
+            print(f"BPM halved: {track.bpm}")
+    elif args.double:
+        if track.bpm:
+            proj.set_bpm(idx, track.bpm * 2)
+            proj.save()
+            print(f"BPM doubled: {track.bpm}")
+    elif args.key:
+        track.key = args.key
+        proj.save()
+        print(f"Key [{idx}] {track.title}: {track.key}")
+    else:
+        print(f"BPM [{idx}] {track.title}: {track.bpm or '?'}")
+
+
+def cmd_stems(args):
+    """Separate track into stems (vocals, drums, bass, other)."""
+    from pymixter.core.stems import separate_track
+
+    proj = get_project(args.project)
+    idx = args.index
+    if idx >= len(proj.library):
+        print(f"Track index {idx} out of range", file=sys.stderr)
+        sys.exit(1)
+
+    track = proj.library[idx]
+    stems_dir = str(proj.project_dir / "stems" / Path(track.path).stem)
+    model = args.model or "Demucs v4: htdemucs"
+
+    print(f"Separating stems for {track.title}...")
+    print(f"  Model: {model}")
+    print(f"  Output: {stems_dir}")
+
+    stems = separate_track(
+        track.path, stems_dir, model=model,
+        on_progress=lambda msg: print(f"  {msg}"),
+    )
+
+    track.stems = stems
+    proj.save()
+    print(f"\nStems created:")
+    for name, path in stems.items():
+        print(f"  {name}: {path}")
+
+
+def cmd_preview(args):
+    """Preview a transition by rendering and playing it."""
+    from pymixter.core.mixer import render_transition_preview
+    from pymixter.core.player import Player
+
+    proj = get_project(args.project)
+    pos = args.pos
+
+    print(f"Rendering transition preview [{pos}]...")
+    audio, sr = render_transition_preview(proj, pos)
+    duration = audio.shape[1] / sr
+    m, s = divmod(int(duration), 60)
+    print(f"Playing transition preview ({m}:{s:02d})...")
+
+    player = Player()
+    signal.signal(signal.SIGINT, lambda *_: (player.stop(), sys.exit(0)))
+    player.load_audio(audio, sr, label="preview")
+    player.play()
+
+    import time
+    while player.state.value != "stopped":
+        time.sleep(0.5)
+    player.close()
+
+
 def cmd_suggest(args):
     """Suggest next compatible track based on key and BPM."""
     proj = get_project(args.project)
@@ -508,6 +595,22 @@ def main():
     p_cue.add_argument("--in", dest="cue_in", type=float, default=None)
     p_cue.add_argument("--out", dest="cue_out", type=float, default=None)
 
+    p_bpm = sub.add_parser("bpm", help="View/set BPM and key for a track")
+    p_bpm.add_argument("index", type=int)
+    p_bpm.add_argument("--set", dest="value", type=float, default=None,
+                        help="Set BPM to exact value")
+    p_bpm.add_argument("--halve", action="store_true", help="Halve BPM")
+    p_bpm.add_argument("--double", action="store_true", help="Double BPM")
+    p_bpm.add_argument("--key", default=None, help="Set key (e.g. Am, C#)")
+
+    p_stems = sub.add_parser("stems", help="Separate track into stems")
+    p_stems.add_argument("index", type=int)
+    p_stems.add_argument("--model", default=None,
+                          help="Separation model (default: htdemucs)")
+
+    p_preview = sub.add_parser("preview", help="Preview a transition")
+    p_preview.add_argument("pos", type=int, help="Timeline position")
+
     p_tl = sub.add_parser("timeline")
     tl_sub = p_tl.add_subparsers(dest="tl_cmd")
     tl_sub.add_parser("show")
@@ -553,6 +656,9 @@ def main():
         "import": cmd_import_xml,
         "open": cmd_open,
         "cue": cmd_cue,
+        "bpm": cmd_bpm,
+        "stems": cmd_stems,
+        "preview": cmd_preview,
     }
 
     if args.command in commands:
