@@ -9,6 +9,28 @@ def main():
         sys.argv = sys.argv[1:]  # strip "cli"
         from pymixter.cli.main import main as cli_main
         cli_main()
+    elif len(sys.argv) > 1 and sys.argv[1] == "web":
+        # Web mode: `uv run python main.py web [--port 8000]`
+        port = 8000
+        if "--port" in sys.argv:
+            idx = sys.argv.index("--port")
+            if idx + 1 < len(sys.argv):
+                port = int(sys.argv[idx + 1])
+        from pathlib import Path
+        from textual_serve.server import Server
+        host = "localhost"
+        if "--host" in sys.argv:
+            idx = sys.argv.index("--host")
+            if idx + 1 < len(sys.argv):
+                host = sys.argv[idx + 1]
+        server = Server(
+            command="uv run python main.py",
+            host=host,
+            port=port,
+            title="PyMixter DJ Mix Studio",
+            templates_path=Path(__file__).parent / "web" / "templates",
+        )
+        server.serve()
     elif len(sys.argv) > 1 and sys.argv[1] == "mcp":
         # MCP server mode: `uv run python main.py mcp [--project project.json]`
         sys.argv = sys.argv[1:]  # strip "mcp"
