@@ -28,6 +28,11 @@ class LibraryTable(DataTable):
             super().__init__()
             self.track_index = track_index
 
+    class TrackHighlighted(Message):
+        def __init__(self, track_index: int):
+            super().__init__()
+            self.track_index = track_index
+
     def on_mount(self):
         self.add_column("Title", key="title")
         self.add_column("BPM", key="bpm", width=7)
@@ -95,6 +100,13 @@ class LibraryTable(DataTable):
                 title_cell = Text(t.title)
 
             self.add_row(title_cell, bpm_cell, key_cell, dur, energy_cell, key=str(i))
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted):
+        try:
+            idx = int(str(event.row_key.value))
+            self.post_message(self.TrackHighlighted(idx))
+        except (ValueError, AttributeError):
+            pass
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected):
         try:

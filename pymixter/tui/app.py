@@ -405,6 +405,9 @@ class MixApp(App):
         self._selected_track_idx = idx
         self._set_status(f"Selected: {track.title}")
 
+    def on_library_table_track_highlighted(self, event: LibraryTable.TrackHighlighted):
+        self._select_track(event.track_index)
+
     def on_library_table_track_selected(self, event: LibraryTable.TrackSelected):
         self._select_track(event.track_index)
         self._play_track(event.track_index)
