@@ -49,6 +49,11 @@ def _load_track_audio(track: Track) -> tuple[np.ndarray, int]:
     if audio.shape[0] == 1:
         audio = np.vstack([audio, audio])
 
+    # Apply ReplayGain normalization (loudness matching between tracks)
+    if track.replay_gain is not None:
+        gain_linear = 10.0 ** (track.replay_gain / 20.0)
+        audio = audio * gain_linear
+
     return audio, sr
 
 

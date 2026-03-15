@@ -112,12 +112,20 @@ def cmd_analyze(args):
     track.bpm = analysis["bpm"]
     track.key = analysis["key"]
     track.duration = analysis["duration"]
+    track.replay_gain = analysis.get("replay_gain")
     if args.full:
         track.beats = analysis.get("beats", [])
         track.cue_in = analysis.get("cue_in")
         track.cue_out = analysis.get("cue_out")
         track.energy = analysis.get("energy", [])
-        track.waveform = analysis.get("_waveform", [])
+        track.waveform = analysis.get("waveform", [])
+        track.lufs = analysis.get("lufs")
+        track.danceability = analysis.get("danceability")
+        track.dynamic_complexity = analysis.get("dynamic_complexity")
+        track.onsets = analysis.get("onsets", [])
+        track.fade_in_end = analysis.get("fade_in_end")
+        track.fade_out_start = analysis.get("fade_out_start")
+        track.chords = analysis.get("chords", [])
 
     proj.save()
     print(json.dumps({
@@ -143,12 +151,20 @@ def cmd_analyze_all(args):
             track.bpm = analysis["bpm"]
             track.key = analysis["key"]
             track.duration = analysis["duration"]
+            track.replay_gain = analysis.get("replay_gain")
             if args.full:
                 track.beats = analysis.get("beats", [])
                 track.cue_in = analysis.get("cue_in")
                 track.cue_out = analysis.get("cue_out")
                 track.energy = analysis.get("energy", [])
-                track.waveform = analysis.get("_waveform", [])
+                track.waveform = analysis.get("waveform", [])
+                track.lufs = analysis.get("lufs")
+                track.danceability = analysis.get("danceability")
+                track.dynamic_complexity = analysis.get("dynamic_complexity")
+                track.onsets = analysis.get("onsets", [])
+                track.fade_in_end = analysis.get("fade_in_end")
+                track.fade_out_start = analysis.get("fade_out_start")
+                track.chords = analysis.get("chords", [])
             count += 1
             print(f"       {track.bpm} BPM, {track.key}, {track.bars} bars")
         except Exception as e:

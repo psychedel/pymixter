@@ -57,6 +57,14 @@ class Track:
     energy: list[float] = field(default_factory=list)  # normalized RMS profile
     waveform: list[float] = field(default_factory=list)  # peak envelope for display
     stems: dict[str, str] = field(default_factory=dict)  # stem_name -> path
+    lufs: float | None = None  # integrated loudness (EBU R128, dB)
+    replay_gain: float | None = None  # replay gain adjustment (dB)
+    danceability: float | None = None  # danceability score (0–3)
+    dynamic_complexity: float | None = None  # dynamic complexity score
+    onsets: list[float] = field(default_factory=list)  # onset positions in seconds
+    fade_in_end: float | None = None  # detected fade-in end time (seconds)
+    fade_out_start: float | None = None  # detected fade-out start time (seconds)
+    chords: list[tuple[float, str]] = field(default_factory=list)  # (time, chord) pairs
 
     def __post_init__(self):
         if not self.title:

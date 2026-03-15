@@ -90,6 +90,14 @@ def _track_summary(idx: int, t: Track) -> dict:
         "has_waveform": bool(t.waveform),
         "has_stems": bool(t.stems),
         "energy_avg": round(sum(t.energy) / len(t.energy), 3) if t.energy else None,
+        "lufs": t.lufs,
+        "replay_gain": t.replay_gain,
+        "danceability": t.danceability,
+        "dynamic_complexity": t.dynamic_complexity,
+        "has_onsets": bool(t.onsets),
+        "has_chords": bool(t.chords),
+        "fade_in_end": t.fade_in_end,
+        "fade_out_start": t.fade_out_start,
         "path": t.path,
     }
 
@@ -128,6 +136,8 @@ def _apply_analysis(track: Track, analysis: dict, full: bool = True):
         track.key = analysis["key"]
     if analysis.get("duration"):
         track.duration = analysis["duration"]
+    if analysis.get("replay_gain") is not None:
+        track.replay_gain = analysis["replay_gain"]
     if full:
         if analysis.get("beats"):
             track.beats = analysis["beats"]
@@ -137,8 +147,22 @@ def _apply_analysis(track: Track, analysis: dict, full: bool = True):
             track.cue_out = analysis["cue_out"]
         if analysis.get("energy"):
             track.energy = analysis["energy"]
-        if analysis.get("_waveform"):
-            track.waveform = analysis["_waveform"]
+        if analysis.get("waveform"):
+            track.waveform = analysis["waveform"]
+        if analysis.get("lufs") is not None:
+            track.lufs = analysis["lufs"]
+        if analysis.get("danceability") is not None:
+            track.danceability = analysis["danceability"]
+        if analysis.get("dynamic_complexity") is not None:
+            track.dynamic_complexity = analysis["dynamic_complexity"]
+        if analysis.get("onsets"):
+            track.onsets = analysis["onsets"]
+        if analysis.get("fade_in_end") is not None:
+            track.fade_in_end = analysis["fade_in_end"]
+        if analysis.get("fade_out_start") is not None:
+            track.fade_out_start = analysis["fade_out_start"]
+        if analysis.get("chords"):
+            track.chords = analysis["chords"]
 
 
 # ── Project tools ─────────────────────────────────────────────

@@ -1,103 +1,110 @@
-"""Audio analysis: BPM, key detection, beat grid, energy, waveform."""
+"""Audio analysis: BPM, key detection, beat grid, energy, waveform.
+
+Uses essentia for key detection and BPM (more accurate than librosa chroma),
+with librosa as fallback for beat grid, cue points, and energy.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import librosa
 import numpy as np
 
 
 def analyze_track(path: str, full: bool = False) -> dict:
     """Analyze a track and return BPM, key, duration, and waveform overview.
 
-    With full=True, also computes beat grid, cue points, and energy profile.
+    With full=True, also computes beat grid, cue points, energy profile,
+    loudness (LUFS/ReplayGain), danceability, dynamic complexity, onsets,
+    fade detection, and chord progression.
     Returns a dict suitable for passing to Project.add_track(**analysis).
     """
-    y, sr = librosa.load(path, sr=None, mono=True)
+    import essentia.standard as es
 
-    duration = librosa.get_duration(y=y, sr=sr)
+    # Load mono for most algorithms
+    audio = es.MonoLoader(filename=path)()
+    sr = 44100  # MonoLoader resamples to 44100
+    duration = len(audio) / sr
+
+    # Key detection
+    key_name, scale, _strength = es.KeyExtractor()(audio)
+    key = key_name + ("m" if scale == "minor" else "")
 
     # BPM + beat positions
-    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-    if hasattr(tempo, "__len__"):
-        tempo = float(tempo[0])
-    bpm = round(float(tempo), 1)
-    beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
+    bpm_val, beat_positions, *_ = es.RhythmExtractor2013()(audio)
+    bpm = round(float(bpm_val), 1)
+    beat_times = [round(float(b), 4) for b in beat_positions]
 
-    # Key detection via chroma
-    key = _detect_key(y, sr)
+    # Loudness: ReplayGain (works on mono)
+    replay_gain = round(float(es.ReplayGain()(audio)), 2)
 
-    # Waveform overview (downsample to ~1000 points for display)
-    waveform = _compute_waveform_overview(y, n_points=1000)
+    # Waveform overview
+    waveform = _compute_waveform_overview(audio, n_points=1000)
 
     result = {
         "title": Path(path).stem,
         "bpm": bpm,
         "key": key,
         "duration": round(duration, 2),
-        "_waveform": waveform.tolist(),
+        "waveform": waveform.tolist(),
+        "replay_gain": replay_gain,
     }
 
     if full:
-        result["beats"] = [round(b, 4) for b in beat_times]
+        result["beats"] = beat_times
         result["cue_in"], result["cue_out"] = _detect_cue_points(
-            y, sr, beat_times,
+            audio, sr, beat_times,
         )
-        result["energy"] = _compute_energy_profile(y, sr)
+        result["energy"] = _compute_energy_profile(audio, sr)
+
+        # LUFS (needs stereo)
+        try:
+            audio_stereo = es.AudioLoader(filename=path)()[0]
+            _mom, _short, integrated, _loudrange = es.LoudnessEBUR128()(audio_stereo)
+            result["lufs"] = round(float(integrated), 1)
+        except Exception:
+            result["lufs"] = None
+
+        # Danceability
+        d_val, _ = es.Danceability()(audio)
+        result["danceability"] = round(float(d_val), 3)
+
+        # Dynamic complexity
+        complexity, _ = es.DynamicComplexity()(audio)
+        result["dynamic_complexity"] = round(float(complexity), 2)
+
+        # Onset positions (convert from sample rate)
+        onset_times, _ = es.OnsetRate()(audio)
+        result["onsets"] = [round(float(o), 4) for o in onset_times]
+
+        # Fade detection (find macro fade-in/fade-out from energy profile)
+        result["fade_in_end"], result["fade_out_start"] = _detect_fades(
+            result["energy"], duration,
+        )
+
+        # Chord detection
+        result["chords"] = _detect_chords(audio, sr, beat_times)
 
     return result
 
 
 def analyze_beats(path: str) -> dict:
     """Lightweight analysis: just beats, cue points, energy."""
-    y, sr = librosa.load(path, sr=None, mono=True)
-    _tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-    beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
+    import essentia.standard as es
 
-    cue_in, cue_out = _detect_cue_points(y, sr, beat_times)
-    energy = _compute_energy_profile(y, sr)
+    audio = es.MonoLoader(filename=path)()
+    _bpm, beat_positions, *_ = es.RhythmExtractor2013()(audio)
+    beat_times = [round(float(b), 4) for b in beat_positions]
+
+    cue_in, cue_out = _detect_cue_points(audio, 44100, beat_times)
+    energy = _compute_energy_profile(audio, 44100)
 
     return {
-        "beats": [round(b, 4) for b in beat_times],
+        "beats": beat_times,
         "cue_in": cue_in,
         "cue_out": cue_out,
         "energy": energy,
     }
-
-
-# ── Key detection ────────────────────────────────────────────
-
-def _detect_key(y: np.ndarray, sr: int) -> str:
-    """Simple key detection using chroma correlation with Krumhansl profiles."""
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
-    chroma_mean = chroma.mean(axis=1)
-
-    # Krumhansl-Kessler major/minor profiles
-    major_profile = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09,
-                              2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
-    minor_profile = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53,
-                              2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
-
-    note_names = ["C", "C#", "D", "D#", "E", "F",
-                  "F#", "G", "G#", "A", "A#", "B"]
-
-    best_corr = -1.0
-    best_key = "C"
-
-    for shift in range(12):
-        shifted = np.roll(chroma_mean, -shift)
-        corr_major = float(np.corrcoef(shifted, major_profile)[0, 1])
-        corr_minor = float(np.corrcoef(shifted, minor_profile)[0, 1])
-
-        if corr_major > best_corr:
-            best_corr = corr_major
-            best_key = note_names[shift]
-        if corr_minor > best_corr:
-            best_corr = corr_minor
-            best_key = note_names[shift] + "m"
-
-    return best_key
 
 
 # ── Beat grid & cue points ──────────────────────────────────
@@ -110,18 +117,20 @@ def _detect_cue_points(y: np.ndarray, sr: int,
     Cue-out: last beat where RMS exceeds 10% of track peak.
     """
     if not beat_times:
-        duration = librosa.get_duration(y=y, sr=sr)
+        duration = len(y) / sr
         return 0.0, round(duration, 4)
 
-    # RMS per beat segment
-    rms_threshold = 0.1 * np.sqrt(np.mean(y ** 2))
+    # Compute RMS in windows
     hop = 512
-    rms = librosa.feature.rms(y=y, hop_length=hop)[0]
-    rms_times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop)
+    n_frames = len(y) // hop
+    rms = np.array([
+        np.sqrt(np.mean(y[i * hop:(i + 1) * hop] ** 2))
+        for i in range(n_frames)
+    ])
+    rms_threshold = 0.1 * np.sqrt(np.mean(y ** 2))
 
     def rms_at(t: float) -> float:
-        idx = np.searchsorted(rms_times, t)
-        idx = min(idx, len(rms) - 1)
+        idx = min(int(t * sr / hop), len(rms) - 1)
         return float(rms[idx])
 
     # Find first/last beats above threshold
@@ -160,6 +169,93 @@ def _compute_energy_profile(y: np.ndarray, sr: int,
     if peak > 0:
         energies = [e / peak for e in energies]
     return [round(e, 3) for e in energies]
+
+
+# ── Fade detection ──────────────────────────────────────────
+
+def _detect_fades(energy: list[float], duration: float) -> tuple[float | None, float | None]:
+    """Detect macro fade-in/fade-out from energy profile.
+
+    Looks for a sustained rise at the start (fade-in) or sustained
+    drop at the end (fade-out) in the energy profile.
+    Returns (fade_in_end_sec, fade_out_start_sec) or None if not detected.
+    """
+    if not energy or len(energy) < 8:
+        return None, None
+
+    seg_dur = duration / len(energy)
+    threshold = 0.3  # energy must rise above this to end fade-in
+
+    # Fade-in: find first segment where energy exceeds threshold
+    # Only count as fade if it starts below threshold
+    fade_in_end = None
+    if energy[0] < threshold:
+        for i, e in enumerate(energy):
+            if e >= threshold:
+                if i >= 2:  # at least 2 segments of fade
+                    fade_in_end = round(i * seg_dur, 2)
+                break
+
+    # Fade-out: find last segment where energy drops below threshold
+    fade_out_start = None
+    if energy[-1] < threshold:
+        for i in range(len(energy) - 1, -1, -1):
+            if energy[i] >= threshold:
+                if (len(energy) - 1 - i) >= 2:  # at least 2 segments of fade
+                    fade_out_start = round((i + 1) * seg_dur, 2)
+                break
+
+    return fade_in_end, fade_out_start
+
+
+# ── Chord detection ─────────────────────────────────────────
+
+def _detect_chords(audio: np.ndarray, sr: int,
+                   beat_times: list[float]) -> list[tuple[float, str]]:
+    """Detect chords at beat positions using essentia ChordsDetection."""
+    import essentia.standard as es
+
+    if not beat_times or len(beat_times) < 2:
+        return []
+
+    # Compute HPCP (Harmonic Pitch Class Profile) frame by frame
+    frame_size = 4096
+    hop_size = 2048
+    w = es.Windowing(type='blackmanharris62')
+    spectrum = es.Spectrum()
+    peaks = es.SpectralPeaks(orderBy='magnitude', magnitudeThreshold=0.00001,
+                              minFrequency=20, maxFrequency=3500)
+    hpcp = es.HPCP()
+
+    hpcp_frames = []
+    for frame in es.FrameGenerator(audio, frameSize=frame_size, hopSize=hop_size):
+        windowed = w(frame)
+        spec = spectrum(windowed)
+        freqs, mags = peaks(spec)
+        h = hpcp(freqs, mags)
+        hpcp_frames.append(h)
+
+    if not hpcp_frames:
+        return []
+
+    hpcp_array = np.array(hpcp_frames)
+
+    # ChordsDetection on HPCP
+    chords_det = es.ChordsDetection(hopSize=hop_size, sampleRate=sr)
+    chord_labels, chord_strengths = chords_det(hpcp_array)
+
+    # Sample chords at beat positions (deduplicate consecutive same chords)
+    frame_dur = hop_size / sr
+    result = []
+    prev_chord = None
+    for bt in beat_times[::4]:  # sample every 4 beats (per bar)
+        frame_idx = min(int(bt / frame_dur), len(chord_labels) - 1)
+        chord = chord_labels[frame_idx]
+        if chord != prev_chord and chord != "N":  # skip "N" (no chord)
+            result.append((round(bt, 2), chord))
+            prev_chord = chord
+
+    return result
 
 
 # ── Waveform ─────────────────────────────────────────────────

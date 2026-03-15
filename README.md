@@ -9,7 +9,7 @@ Terminal-based AI DJ mix agent and studio. Analyze tracks, build playlists, auto
 ## Features
 
 - **4 interfaces** — TUI (terminal), Web (browser), CLI (scripting), MCP (AI agents)
-- **Audio analysis** — BPM, key detection (Krumhansl-Kessler), beat grid, cue points, energy profile, waveform (librosa)
+- **Audio analysis** — BPM, key, beat grid, cue points, energy, waveform, LUFS, danceability, chords (essentia)
 - **Harmonic mixing** — Camelot wheel compatibility, automatic key matching via pitch shift (±6 semitones)
 - **5 transition types** — crossfade, EQ fade, cut, echo out, filter sweep (LadderFilter)
 - **DSP engine** — pedalboard-powered: 3-band EQ, compressor, limiter, noise gate, pitch shift, ladder filter
@@ -17,6 +17,7 @@ Terminal-based AI DJ mix agent and studio. Analyze tracks, build playlists, auto
 - **Stem separation** — vocals/drums/bass/other via htdemucs (audio-separator)
 - **Automix** — auto-arrange by key/BPM, auto-select transition types and lengths
 - **Tempo sync** — time-stretch tracks to match BPM during transitions
+- **Loudness normalization** — ReplayGain auto-applied during rendering for consistent volume
 - **Undo/redo** — full project state history
 - **Rekordbox XML** — import/export for interop with Rekordbox, Mixxx, Traktor, Serato
 - **Multi-format render** — WAV, MP3 (V0/V2/320k), FLAC output
