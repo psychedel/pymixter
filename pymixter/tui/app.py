@@ -12,6 +12,7 @@ from textual.events import MouseMove
 from textual.theme import Theme
 from textual.widgets import Header, Footer, Static, TabbedContent, TabPane
 from textual.timer import Timer
+from textual.worker import Worker, WorkerState
 
 from pymixter.core.project import Project, find_audio_files
 from pymixter.core.analysis import analyze_track
@@ -150,6 +151,28 @@ class MixApp(App):
     def on_unmount(self):
         self.player.close()
 
+    def on_worker_state_changed(self, event: Worker.StateChanged):
+        worker = event.worker
+        if worker.state != WorkerState.SUCCESS and worker.state != WorkerState.ERROR:
+            return
+        if worker.name == "render":
+            if worker.error:
+                self._set_status(f"Render error: {worker.error}")
+            else:
+                self._set_status(f"Rendered to {worker.result}")
+        elif worker.name == "playmix":
+            if worker.error:
+                self._set_status(f"Mix playback error: {worker.error}")
+            else:
+                audio, sr = worker.result
+                if audio.shape[1] == 0:
+                    self._set_status("Nothing to play — rendered empty audio")
+                    return
+                self.player.load_audio(audio, sr, label="mix")
+                self.player.play()
+                duration = audio.shape[1] / sr
+                self._set_status(f">> Playing mix ({_fmt_time(duration)})")
+
     def _check_for_changes(self):
         """Poll project file for external changes (e.g., from CLI)."""
         p = Path(self.project_path)
@@ -248,6 +271,7 @@ class MixApp(App):
         parts = cmd.split()
         verb, args = parts[0].lower(), parts[1:]
 
+        # Commands that take no args or handle args internally
         dispatch = {
             "help": lambda: self._set_status(
                 "add scan analyze automix timeline transition cue eq gain render validate playmix export import undo redo"
@@ -261,65 +285,65 @@ class MixApp(App):
                 f"{self.project.name}: {len(self.project.library)} tracks, "
                 f"{len(self.project.timeline)} in timeline"
             ),
+            "automix": lambda: self._run_automix(args),
+            "timeline": lambda: self._handle_timeline_cmd(args),
+            "transition": lambda: self._handle_transition_cmd(args),
+            "cue": lambda: self._handle_cue_cmd(args),
+            "eq": lambda: self._handle_eq_cmd(args),
+            "undo": lambda: self.action_undo(),
+            "redo": lambda: self.action_redo(),
+            "render": lambda: self._render_mix(args),
+            "validate": lambda: self._validate_mix(),
+            "playmix": lambda: self._play_mix(),
+            "export": lambda: self._export_project(args),
+            "play": lambda: self._cmd_play(args),
+            "seek": lambda: self._cmd_seek(args),
+            "analyze": lambda: self._cmd_analyze(args),
+            "add": lambda: self._import_file(" ".join(args)) if args else self._set_status("Usage: add <path>"),
+            "scan": lambda: self._scan_directory(" ".join(args)) if args else self._set_status("Usage: scan <dir>"),
+            "gain": lambda: self._cmd_gain(args),
+            "import": lambda: self._import_xml(" ".join(args)) if args else self._set_status("Usage: import <file>"),
+            "open": lambda: self._open_project(" ".join(args)) if args else self._set_status("Usage: open <file>"),
         }
 
-        if verb in dispatch:
-            dispatch[verb]()
-        elif verb == "play":
-            idx = int(args[0]) if args else self._selected_track_idx
-            if idx is not None:
-                self._play_track(idx)
-            else:
-                self._set_status("Usage: play [index]")
-        elif verb == "seek" and args:
-            try:
-                self.player.seek(float(args[0]))
-            except ValueError:
-                self._set_status("Usage: seek <seconds>")
-        elif verb == "automix":
-            self._run_automix(args)
-        elif verb == "add" and args:
-            self._import_file(" ".join(args))
-        elif verb == "scan" and args:
-            self._scan_directory(" ".join(args))
-        elif verb == "analyze":
-            idx = int(args[0]) if args else self._selected_track_idx
-            if idx is not None:
-                self._analyze_track(idx)
-            else:
-                self._set_status("Usage: analyze [index]")
-        elif verb == "timeline":
-            self._handle_timeline_cmd(args)
-        elif verb == "transition":
-            self._handle_transition_cmd(args)
-        elif verb == "cue":
-            self._handle_cue_cmd(args)
-        elif verb == "eq":
-            self._handle_eq_cmd(args)
-        elif verb == "gain" and args:
-            try:
-                self.player.deck_a.gain.gain_db = float(args[0])
-                self._set_status(f"Gain: {args[0]} dB")
-            except ValueError:
-                self._set_status("Usage: gain <dB>")
-        elif verb == "undo":
-            self.action_undo()
-        elif verb == "redo":
-            self.action_redo()
-        elif verb == "render":
-            self._render_mix(args)
-        elif verb == "validate":
-            self._validate_mix()
-        elif verb == "playmix":
-            self._play_mix()
-        elif verb == "export":
-            self._export_project(args)
-        elif verb == "import" and args:
-            self._import_xml(" ".join(args))
-        elif verb == "open" and args:
-            self._open_project(" ".join(args))
+        handler = dispatch.get(verb)
+        if handler:
+            handler()
         else:
             self._set_status(f"Unknown: {verb}. Type :help")
+
+    def _cmd_play(self, args: list[str]):
+        idx = int(args[0]) if args else self._selected_track_idx
+        if idx is not None:
+            self._play_track(idx)
+        else:
+            self._set_status("Usage: play [index]")
+
+    def _cmd_seek(self, args: list[str]):
+        if not args:
+            self._set_status("Usage: seek <seconds>")
+            return
+        try:
+            self.player.seek(float(args[0]))
+        except ValueError:
+            self._set_status("Usage: seek <seconds>")
+
+    def _cmd_analyze(self, args: list[str]):
+        idx = int(args[0]) if args else self._selected_track_idx
+        if idx is not None:
+            self._analyze_track(idx)
+        else:
+            self._set_status("Usage: analyze [index]")
+
+    def _cmd_gain(self, args: list[str]):
+        if not args:
+            self._set_status("Usage: gain <dB>")
+            return
+        try:
+            self.player.deck_a.gain.gain_db = float(args[0])
+            self._set_status(f"Gain: {args[0]} dB")
+        except ValueError:
+            self._set_status("Usage: gain <dB>")
 
     # ── Playback from command / selection ─────────────────────
 
@@ -517,22 +541,23 @@ class MixApp(App):
     # ── Mix rendering / validation ─────────────────────────────
 
     def _render_mix(self, args: list[str]):
-        """Render timeline to WAV file."""
+        """Render timeline to audio file (non-blocking)."""
         if not self.project.timeline:
             self._set_status("Timeline is empty — add tracks first")
             return
         output = args[0] if args else self.project_path.replace(".json", "_mix.wav")
         self._set_status(f"Rendering {len(self.project.timeline)} tracks...")
-        try:
-            path = render_to_file(
+
+        def _do_render():
+            return render_to_file(
                 self.project, output,
-                on_progress=lambda pos, total, msg: self._set_status(
-                    f"Rendering [{pos+1}/{total}] {msg}"
+                on_progress=lambda pos, total, msg: self.call_from_thread(
+                    self._set_status, f"Rendering [{pos+1}/{total}] {msg}"
                 ),
             )
-            self._set_status(f"Rendered to {path}")
-        except Exception as e:
-            self._set_status(f"Render error: {e}")
+
+        self.run_worker(_do_render, thread=True, exit_on_error=False,
+                        name="render", exclusive=True, group="render")
 
     def _validate_mix(self):
         """Validate timeline for issues."""
@@ -550,27 +575,23 @@ class MixApp(App):
                 log.warning("validate: %s", w)
 
     def _play_mix(self):
-        """Render timeline and play it."""
+        """Render timeline and play it (non-blocking)."""
         if not self.project.timeline:
             self._set_status("Timeline is empty — add tracks first")
             return
         self._set_status("Rendering mix for playback...")
-        try:
+
+        def _do_render_and_play():
             audio, sr = render_timeline(
                 self.project,
-                on_progress=lambda pos, total, msg: self._set_status(
-                    f"Rendering [{pos+1}/{total}] {msg}"
+                on_progress=lambda pos, total, msg: self.call_from_thread(
+                    self._set_status, f"Rendering [{pos+1}/{total}] {msg}"
                 ),
             )
-            if audio.shape[1] == 0:
-                self._set_status("Nothing to play — rendered empty audio")
-                return
-            self.player.load_audio(audio, sr, label="mix")
-            self.player.play()
-            duration = audio.shape[1] / sr
-            self._set_status(f">> Playing mix ({_fmt_time(duration)})")
-        except Exception as e:
-            self._set_status(f"Mix playback error: {e}")
+            return audio, sr
+
+        self.run_worker(_do_render_and_play, thread=True, exit_on_error=False,
+                        name="playmix", exclusive=True, group="render")
 
     # ── Timeline commands ──────────────────────────────────────
 

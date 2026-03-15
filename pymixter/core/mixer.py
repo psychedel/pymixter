@@ -12,10 +12,10 @@ from pathlib import Path
 import numpy as np
 from pedalboard import (
     Pedalboard, Gain, Delay, Reverb,
-    HighpassFilter, LowpassFilter, LowShelfFilter,
+    HighpassFilter, LowpassFilter,
     time_stretch,
 )
-from pedalboard.io import AudioFile, WriteableAudioFile
+from pedalboard.io import AudioFile
 
 from pymixter.core.project import Project, Track, Transition
 

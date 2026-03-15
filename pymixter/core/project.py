@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Literal
+
+def _pack_floats(values: list[float]) -> str:
+    """Quantize 0–1 floats to uint8 and encode as base85 string."""
+    if not values:
+        return ""
+    data = bytes(min(255, max(0, int(v * 255))) for v in values)
+    return base64.b85encode(data).decode("ascii")
+
+
+def _unpack_floats(encoded: str) -> list[float]:
+    """Decode base85 string back to 0–1 float list."""
+    if not encoded:
+        return []
+    data = base64.b85decode(encoded)
+    return [b / 255.0 for b in data]
+
 
 AUDIO_EXTENSIONS = frozenset({
     ".mp3", ".flac", ".wav", ".ogg", ".m4a", ".aac", ".opus", ".wma",
@@ -71,11 +88,20 @@ class Project:
         save_path = Path(path or self._path or "project.json")
         self._path = str(save_path)
         self._version += 1
+        lib_data = []
+        for t in self.library:
+            d = asdict(t)
+            # Pack large float arrays as compact base85
+            if d.get("waveform"):
+                d["waveform"] = _pack_floats(d["waveform"])
+            if d.get("energy"):
+                d["energy"] = _pack_floats(d["energy"])
+            lib_data.append(d)
         data = {
             "name": self.name,
             "version": self._version,
             "saved_at": time.time(),
-            "library": [asdict(t) for t in self.library],
+            "library": lib_data,
             "timeline": self.timeline,
             "transitions": [asdict(t) for t in self.transitions],
         }
@@ -84,9 +110,17 @@ class Project:
     @classmethod
     def load(cls, path: str) -> Project:
         data = json.loads(Path(path).read_text())
+        tracks = []
+        for t in data.get("library", []):
+            # Unpack base85-encoded float arrays
+            if isinstance(t.get("waveform"), str):
+                t["waveform"] = _unpack_floats(t["waveform"])
+            if isinstance(t.get("energy"), str):
+                t["energy"] = _unpack_floats(t["energy"])
+            tracks.append(Track(**t))
         proj = cls(
             name=data.get("name", "Untitled Mix"),
-            library=[Track(**t) for t in data.get("library", [])],
+            library=tracks,
             timeline=data.get("timeline", []),
             transitions=[Transition(**t) for t in data.get("transitions", [])],
         )
@@ -132,24 +166,70 @@ class Project:
         to_pos = max(0, min(to_pos, len(self.timeline) - 1))
         if from_pos == to_pos:
             return
+
+        # Build position mapping: old_pos -> new_pos
+        n = len(self.timeline)
+        pos_map: dict[int, int] = {}
+        if from_pos < to_pos:
+            for i in range(n):
+                if i == from_pos:
+                    pos_map[i] = to_pos
+                elif from_pos < i <= to_pos:
+                    pos_map[i] = i - 1
+                else:
+                    pos_map[i] = i
+        else:
+            for i in range(n):
+                if i == from_pos:
+                    pos_map[i] = to_pos
+                elif to_pos <= i < from_pos:
+                    pos_map[i] = i + 1
+                else:
+                    pos_map[i] = i
+
         item = self.timeline.pop(from_pos)
         self.timeline.insert(to_pos, item)
-        self._rebuild_transitions()
+        self._reindex_transitions(pos_map)
 
     def remove_from_timeline(self, pos: int):
         """Remove a track from the timeline by position."""
         if pos < 0 or pos >= len(self.timeline):
             raise IndexError(f"Position {pos} out of range")
-        self.timeline.pop(pos)
-        self._rebuild_transitions()
 
-    def _rebuild_transitions(self):
-        """Remove transitions that reference invalid positions."""
+        # Build position mapping: old_pos -> new_pos (removed pos maps to -1)
+        n = len(self.timeline)
+        pos_map: dict[int, int] = {}
+        for i in range(n):
+            if i == pos:
+                pos_map[i] = -1
+            elif i > pos:
+                pos_map[i] = i - 1
+            else:
+                pos_map[i] = i
+
+        self.timeline.pop(pos)
+        self._reindex_transitions(pos_map)
+
+    def _reindex_transitions(self, pos_map: dict[int, int]):
+        """Reindex transitions after timeline reorder/removal.
+
+        pos_map maps old position -> new position (-1 means removed).
+        """
         max_pos = len(self.timeline) - 1
-        self.transitions = [
-            t for t in self.transitions
-            if t.from_track < max_pos and t.to_track <= max_pos
-        ]
+        updated = []
+        for t in self.transitions:
+            new_from = pos_map.get(t.from_track, -1)
+            new_to = pos_map.get(t.to_track, -1)
+            if new_from < 0 or new_to < 0:
+                continue
+            if new_from >= max_pos or new_to > max_pos:
+                continue
+            # Only keep if they're still adjacent
+            if new_to == new_from + 1:
+                t.from_track = new_from
+                t.to_track = new_to
+                updated.append(t)
+        self.transitions = updated
 
     def set_transition(self, from_pos: int, tr_type: str = "crossfade",
                        length_bars: int = 16, **kwargs) -> Transition:
