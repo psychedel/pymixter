@@ -106,6 +106,50 @@ class TrackInfo(Static):
             lines.append(blocks, style="#c8a848")
             lines.append("\n")
 
+        # ── Analysis metrics ──
+        has_metrics = any([t.lufs, t.replay_gain, t.danceability, t.dynamic_complexity])
+        if has_metrics:
+            lines.append("\n")
+            if t.lufs is not None:
+                lines.append("  LUFS ", style="dim")
+                lines.append(f"{t.lufs:.1f}", style="bold #a8b060")
+            if t.replay_gain is not None:
+                lines.append("   RG ", style="dim")
+                lines.append(f"{t.replay_gain:+.1f}dB", style="#7a8a50")
+            if t.danceability is not None:
+                lines.append("   Dance ", style="dim")
+                lines.append(f"{t.danceability:.2f}", style="bold #c8a848")
+            if t.dynamic_complexity is not None:
+                lines.append("   Dyn ", style="dim")
+                lines.append(f"{t.dynamic_complexity:.1f}", style="#7a8a50")
+            lines.append("\n")
+
+        # ── Fade detection ──
+        if t.fade_in_end is not None or t.fade_out_start is not None:
+            lines.append("  Fades ", style="dim")
+            if t.fade_in_end is not None:
+                fi_m, fi_s = divmod(int(t.fade_in_end), 60)
+                lines.append(f"in→{fi_m}:{fi_s:02d}", style="#7a8a50")
+            if t.fade_out_start is not None:
+                fo_m, fo_s = divmod(int(t.fade_out_start), 60)
+                if t.fade_in_end is not None:
+                    lines.append("  ", style="")
+                lines.append(f"out@{fo_m}:{fo_s:02d}", style="#7a8a50")
+            lines.append("\n")
+
+        # ── Chords ──
+        if t.chords:
+            lines.append("  Chords ", style="dim")
+            # Show unique chords in sequence (compact)
+            shown = []
+            for _time, chord in t.chords[:12]:
+                if not shown or shown[-1] != chord:
+                    shown.append(chord)
+            lines.append(" → ".join(shown), style="#a8b060")
+            if len(t.chords) > 12:
+                lines.append(" …", style="dim")
+            lines.append("\n")
+
         # ── Stems ──
         if t.stems:
             lines.append("\n  Stems  ", style="dim")

@@ -280,7 +280,10 @@ def track_analyze(params: dict) -> dict:
 
     track = proj.library[idx]
     full = params.get("full", True)
-    analysis = analyze_track(track.path, full=full)
+    try:
+        analysis = analyze_track(track.path, full=full)
+    except Exception as e:
+        return _error(f"Analysis failed for '{track.title}': {e}")
     _apply_analysis(track, analysis, full=full)
     SESSION.save()
     return _track_summary(idx, track)
@@ -584,6 +587,7 @@ def mix_compatibility_matrix(params: dict) -> dict:
     matrix = []
     for i, t_a in analyzed:
         row = {"index": i, "title": t_a.title, "bpm": t_a.bpm, "key": t_a.key,
+               "danceability": t_a.danceability, "lufs": t_a.lufs,
                "compatible_with": []}
         for j, t_b in analyzed:
             if i == j:
@@ -626,7 +630,8 @@ def mix_suggest_next(params: dict) -> dict:
             {"index": i, "title": t.title, "bpm": t.bpm, "key": t.key,
              "camelot": to_camelot(t.key), "score": round(score, 1),
              "key_compatible": key_ok,
-             "bpm_diff": round(abs(t.bpm - last.bpm), 1) if t.bpm and last.bpm else None}
+             "bpm_diff": round(abs(t.bpm - last.bpm), 1) if t.bpm and last.bpm else None,
+             "danceability": t.danceability, "lufs": t.lufs}
             for i, t, score, key_ok in candidates
         ],
     }
@@ -740,6 +745,9 @@ def mix_energy_profile(params: dict) -> dict:
             "energy_avg": avg,
             "energy_peak": peak,
             "energy_quarters": quarters,
+            "danceability": t.danceability,
+            "lufs": t.lufs,
+            "dynamic_complexity": t.dynamic_complexity,
         })
 
     return {"profile": profile}
@@ -792,6 +800,18 @@ def mix_validate(params: dict) -> dict:
                     "position": pos, "type": "bpm_jump",
                     "from_bpm": a.bpm, "to_bpm": b.bpm, "diff": round(diff, 1),
                     "suggestion": "Consider a cut transition or reorder tracks",
+                })
+
+        # Check LUFS difference (loudness mismatch)
+        if a.lufs is not None and b.lufs is not None:
+            lufs_diff = abs(a.lufs - b.lufs)
+            if lufs_diff > 6:
+                warnings.append({
+                    "position": pos, "type": "loudness_mismatch",
+                    "from": f"{a.title} ({a.lufs:.1f} LUFS)",
+                    "to": f"{b.title} ({b.lufs:.1f} LUFS)",
+                    "diff_db": round(lufs_diff, 1),
+                    "suggestion": "Re-analyze with --full for ReplayGain normalization",
                 })
 
         # Check for missing transition

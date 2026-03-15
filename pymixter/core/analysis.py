@@ -11,6 +11,10 @@ from pathlib import Path
 import numpy as np
 
 
+class AnalysisError(Exception):
+    """Raised when audio analysis fails on a file."""
+
+
 def analyze_track(path: str, full: bool = False) -> dict:
     """Analyze a track and return BPM, key, duration, and waveform overview.
 
@@ -18,13 +22,25 @@ def analyze_track(path: str, full: bool = False) -> dict:
     loudness (LUFS/ReplayGain), danceability, dynamic complexity, onsets,
     fade detection, and chord progression.
     Returns a dict suitable for passing to Project.add_track(**analysis).
+
+    Raises AnalysisError with a human-readable message if the file cannot
+    be loaded or analyzed.
     """
     import essentia.standard as es
 
     # Load mono for most algorithms
-    audio = es.MonoLoader(filename=path)()
+    try:
+        audio = es.MonoLoader(filename=path)()
+    except RuntimeError as exc:
+        raise AnalysisError(f"Cannot load audio file: {exc}") from exc
+    except Exception as exc:
+        raise AnalysisError(f"Failed to read '{path}': {exc}") from exc
+
     sr = 44100  # MonoLoader resamples to 44100
     duration = len(audio) / sr
+
+    if duration < 1.0:
+        raise AnalysisError(f"File too short ({duration:.1f}s) — need at least 1 second")
 
     # Key detection
     key_name, scale, _strength = es.KeyExtractor()(audio)

@@ -57,7 +57,10 @@ def cmd_add(args):
     analysis = {}
     if args.analyze:
         print(f"Analyzing {audio_path}...")
-        analysis = analyze_track(audio_path, full=True)
+        try:
+            analysis = analyze_track(audio_path, full=True)
+        except Exception as e:
+            print(f"Analysis failed: {e}", file=sys.stderr)
 
     track = proj.import_track(audio_path, **analysis)
     print(f"Imported: {track.title} -> {track.path}")
@@ -107,7 +110,11 @@ def cmd_analyze(args):
 
     track = proj.library[idx]
     print(f"Analyzing {track.path}...")
-    analysis = analyze_track(track.path, full=args.full)
+    try:
+        analysis = analyze_track(track.path, full=args.full)
+    except Exception as e:
+        print(f"Analysis failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
     track.bpm = analysis["bpm"]
     track.key = analysis["key"]
@@ -128,14 +135,26 @@ def cmd_analyze(args):
         track.chords = analysis.get("chords", [])
 
     proj.save()
-    print(json.dumps({
+    result = {
         "bpm": track.bpm,
         "key": track.key,
         "duration": track.duration,
         "bars": track.bars,
         "cue_in": track.cue_in,
         "cue_out": track.cue_out,
-    }, indent=2))
+        "replay_gain": track.replay_gain,
+    }
+    if args.full:
+        result.update({
+            "lufs": track.lufs,
+            "danceability": track.danceability,
+            "dynamic_complexity": track.dynamic_complexity,
+            "fade_in_end": track.fade_in_end,
+            "fade_out_start": track.fade_out_start,
+            "chords_count": len(track.chords),
+            "onsets_count": len(track.onsets),
+        })
+    print(json.dumps(result, indent=2))
 
 
 def cmd_analyze_all(args):
@@ -215,7 +234,12 @@ def cmd_library(args):
         key = t.key or "?"
         dur = f"{t.duration:.0f}s" if t.duration else "?"
         bars = f"{t.bars}bar" if t.bars else ""
-        print(f"  [{i}] {t.title}  BPM:{bpm}  Key:{key}  Dur:{dur}  {bars}")
+        extras = ""
+        if t.lufs is not None:
+            extras += f"  LUFS:{t.lufs:.1f}"
+        if t.danceability is not None:
+            extras += f"  Dance:{t.danceability:.2f}"
+        print(f"  [{i}] {t.title}  BPM:{bpm}  Key:{key}  Dur:{dur}  {bars}{extras}")
 
 
 def cmd_timeline_show(args):
