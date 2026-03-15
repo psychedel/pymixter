@@ -68,12 +68,20 @@ class Deck:
         self.noise_gate = NoiseGate(threshold_db=-100.0, release_ms=50.0)
         self.effects: list = []  # additional pedalboard plugins
         self._board = Pedalboard([])
+        self._dirty = True
 
     def _rebuild_board(self):
-        """Rebuild the processing chain."""
+        """Rebuild the processing chain (only when dirty)."""
+        if not self._dirty:
+            return
         plugins = [self.noise_gate, self.eq.low, self.eq.mid, self.eq.high, self.gain]
         plugins.extend(self.effects)
         self._board = Pedalboard(plugins)
+        self._dirty = False
+
+    def mark_dirty(self):
+        """Mark the effect chain for rebuild on next process call."""
+        self._dirty = True
 
     def process(self, audio: np.ndarray, sr: int) -> np.ndarray:
         """Process audio through EQ + gain + effects chain."""
@@ -162,8 +170,12 @@ class Player:
 
     # ── Load ─────────────────────────────────────────────────
 
-    def load(self, path: str):
-        """Load an audio file into memory. Stops current playback."""
+    def load(self, path: str, replay_gain_db: float | None = None):
+        """Load an audio file into memory. Stops current playback.
+
+        If replay_gain_db is provided, loudness normalization is applied
+        so playback volume is consistent across tracks.
+        """
         self.stop()
         p = Path(path)
         if not p.exists():
@@ -174,6 +186,11 @@ class Player:
             data = f.read(f.frames)  # shape: (channels, frames)
             sr = f.samplerate
             channels = f.num_channels
+
+        # Apply ReplayGain normalization for consistent loudness
+        if replay_gain_db is not None:
+            gain_linear = 10.0 ** (replay_gain_db / 20.0)
+            data = data * gain_linear
 
         with self._lock:
             self._samples = data

@@ -88,7 +88,19 @@ class TimelineView(Static):
                 text.append("░" * bw, style=f"dim {color}")
         text.append("\n")
 
-        # ── Row 3: BPM + Key labels ──
+        # ── Row 3: Beat grid density ──
+        has_beats = any(t and t.beats for t in tracks)
+        if has_beats:
+            for pos, (t, bw) in enumerate(zip(tracks, bar_widths)):
+                color = self.COLORS[pos % len(self.COLORS)]
+                if t and t.beats and t.duration:
+                    grid_text = _mini_beat_grid(t.beats, t.duration, bw)
+                    text.append_text(grid_text)
+                else:
+                    text.append(" " * bw, style=f"dim {color}")
+            text.append("\n")
+
+        # ── Row 4: BPM + Key labels ──
         for pos, (t, bw) in enumerate(zip(tracks, bar_widths)):
             if t:
                 bpm_str = f"{t.bpm:g}" if t.bpm else "?"
@@ -199,6 +211,31 @@ def _combine_energy(tracks, bar_widths, total_width) -> list[float]:
         else:
             result.extend([0.0] * bw)
     return result
+
+
+def _mini_beat_grid(beats: list[float], duration: float, width: int) -> Text:
+    """Render a compact beat grid: ┃ for phrases, │ for bars, · for beats."""
+    grid = [" "] * width
+    for i, beat in enumerate(beats):
+        col = int(beat / duration * width) if duration else 0
+        if 0 <= col < width:
+            if i % 16 == 0:
+                grid[col] = "┃"
+            elif i % 4 == 0:
+                grid[col] = "│"
+            elif grid[col] == " ":
+                grid[col] = "·"
+    text = Text()
+    for ch in grid:
+        if ch == "┃":
+            text.append(ch, style="bold #c8cc6e")
+        elif ch == "│":
+            text.append(ch, style="#7a8a50")
+        elif ch == "·":
+            text.append(ch, style="#4a4d4a")
+        else:
+            text.append(ch)
+    return text
 
 
 def _render_energy_arc(energy: list[float], width: int) -> Text:

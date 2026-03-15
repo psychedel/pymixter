@@ -6,6 +6,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from pymixter.core.project import Track, to_camelot
+from pymixter.tui.widgets.utils import resample as _resample
 
 
 class TrackInfo(Static):
@@ -327,18 +328,6 @@ def _render_sections(energy: list[float], width: int) -> Text:
     for label, color in labels:
         text.append(label.center(col_width), style=f"dim {color}")
     return text
-
-
-def _resample(data: list[float], width: int) -> list[float]:
-    """Resample data to target width using max pooling."""
-    n = len(data)
-    result = []
-    for i in range(width):
-        src_start = int(i * n / width)
-        src_end = max(src_start + 1, int((i + 1) * n / width))
-        chunk = data[src_start:src_end]
-        result.append(max(chunk) if chunk else 0.0)
-    return result
 
 
 def _energy_char(val: float) -> str:

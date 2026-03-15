@@ -1,17 +1,45 @@
 """Transition zoom view — detailed visualization of the overlap zone between two tracks."""
 
+from textual.binding import Binding
+from textual.message import Message
 from textual.widgets import Static
 from rich.panel import Panel
 from rich.text import Text
 
 from pymixter.core.project import Project, Track, Transition, to_camelot
+from pymixter.tui.widgets.utils import resample as _resample
 
 
 _BLOCKS = " ▁▂▃▄▅▆▇█"
 
 
-class TransitionZoom(Static):
-    """Shows a zoomed-in view of the transition zone between two tracks."""
+class TransitionZoom(Static, can_focus=True):
+    """Shows a zoomed-in view of the transition zone between two tracks.
+
+    When focused, arrow keys adjust cue points:
+      Left/Right — nudge cue_out of track A by ±0.5s (Shift: ±0.1s)
+      Ctrl+Left/Right — nudge cue_in of track B
+      [ / ] — snap cue_out/cue_in to nearest beat
+    """
+
+    BINDINGS = [
+        Binding("left", "nudge_a(-0.5)", "A cue ←", show=False),
+        Binding("right", "nudge_a(0.5)", "A cue →", show=False),
+        Binding("shift+left", "nudge_a(-0.1)", "A cue ← fine", show=False),
+        Binding("shift+right", "nudge_a(0.1)", "A cue → fine", show=False),
+        Binding("ctrl+left", "nudge_b(-0.5)", "B cue ←", show=False),
+        Binding("ctrl+right", "nudge_b(0.5)", "B cue →", show=False),
+        Binding("left_square_bracket", "snap_a", "Snap A", show=False),
+        Binding("right_square_bracket", "snap_b", "Snap B", show=False),
+    ]
+
+    class CueChanged(Message):
+        """Emitted when a cue point is adjusted via the zoom editor."""
+        def __init__(self, track_idx: int, cue_in: float | None, cue_out: float | None):
+            super().__init__()
+            self.track_idx = track_idx
+            self.cue_in = cue_in
+            self.cue_out = cue_out
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -26,6 +54,66 @@ class TransitionZoom(Static):
     def clear_zoom(self):
         self._project = None
         self._position = None
+        self.refresh(layout=True)
+
+    def _get_tracks(self) -> tuple[Track, Track, int, int] | None:
+        """Return (track_a, track_b, idx_a, idx_b) or None."""
+        if not self._project or self._position is None:
+            return None
+        proj = self._project
+        pos = self._position
+        if pos < 0 or pos >= len(proj.timeline) - 1:
+            return None
+        idx_a = proj.timeline[pos]
+        idx_b = proj.timeline[pos + 1]
+        if idx_a >= len(proj.library) or idx_b >= len(proj.library):
+            return None
+        return proj.library[idx_a], proj.library[idx_b], idx_a, idx_b
+
+    def action_nudge_a(self, delta: float) -> None:
+        pair = self._get_tracks()
+        if not pair:
+            return
+        track_a, _, idx_a, _ = pair
+        current = track_a.cue_out or track_a.duration or 0
+        track_a.cue_out = max(0, round(current + delta, 3))
+        self.post_message(self.CueChanged(idx_a, cue_in=None, cue_out=track_a.cue_out))
+        self.refresh(layout=True)
+
+    def action_nudge_b(self, delta: float) -> None:
+        pair = self._get_tracks()
+        if not pair:
+            return
+        _, track_b, _, idx_b = pair
+        current = track_b.cue_in or 0
+        track_b.cue_in = max(0, round(current + delta, 3))
+        self.post_message(self.CueChanged(idx_b, cue_in=track_b.cue_in, cue_out=None))
+        self.refresh(layout=True)
+
+    def action_snap_a(self) -> None:
+        pair = self._get_tracks()
+        if not pair:
+            return
+        track_a, _, idx_a, _ = pair
+        if not track_a.beats:
+            return
+        current = track_a.cue_out or track_a.duration or 0
+        snapped = track_a.snap_to_beat(current)
+        track_a.cue_out = snapped
+        self.post_message(self.CueChanged(idx_a, cue_in=None, cue_out=snapped))
+        self.refresh(layout=True)
+
+    def action_snap_b(self) -> None:
+        pair = self._get_tracks()
+        if not pair:
+            return
+        _, track_b, _, idx_b = pair
+        if not track_b.beats:
+            return
+        current = track_b.cue_in or 0
+        snapped = track_b.snap_to_beat(current)
+        track_b.cue_in = snapped
+        self.post_message(self.CueChanged(idx_b, cue_in=snapped, cue_out=None))
         self.refresh(layout=True)
 
     def render(self):
@@ -123,7 +211,7 @@ class TransitionZoom(Static):
         b_zoom_start = b_start - tr_sec + offset_sec - (zoom_sec / 2 - tr_sec + offset_sec)
         b_zoom_end = b_zoom_start + zoom_sec
 
-        # Track A waveform
+        # Track A waveform + cue_out marker
         lines.append("  A ", style="dim #a8b060")
         wf_a = _render_zoom_waveform(
             track_a, wf_width, zoom_start=a_zoom_start,
@@ -131,6 +219,15 @@ class TransitionZoom(Static):
             color="#a8b060", fade_out=tr is not None,
         )
         lines.append_text(wf_a)
+        lines.append("\n")
+
+        # Cue_out marker for A
+        lines.append("    ")
+        cue_a = _render_cue_marker(
+            a_end, a_zoom_start, a_zoom_end, wf_width,
+            label="▼ cue out", color="#a8b060",
+        )
+        lines.append_text(cue_a)
         lines.append("\n")
 
         # Track A beat grid
@@ -147,6 +244,15 @@ class TransitionZoom(Static):
             overlap = _render_overlap_bar(wf_width, zoom_sec, tr_sec, offset_sec)
             lines.append_text(overlap)
             lines.append("\n")
+
+        # Cue_in marker for B
+        lines.append("    ")
+        cue_b = _render_cue_marker(
+            b_start, b_zoom_start, b_zoom_end, wf_width,
+            label="▲ cue in", color="#c8cc6e",
+        )
+        lines.append_text(cue_b)
+        lines.append("\n")
 
         # Track B beat grid (same time axis as A)
         lines.append("  B ", style="dim #c8cc6e")
@@ -171,6 +277,12 @@ class TransitionZoom(Static):
         ruler = _render_zoom_ruler(zoom_sec, wf_width)
         lines.append_text(ruler)
         lines.append("\n")
+
+        # Editing hint
+        if self.has_focus:
+            lines.append("  ←→ nudge A cue  Ctrl+←→ nudge B cue  "
+                         "[ ] snap to beat", style="dim italic")
+            lines.append("\n")
 
         title = f"Transition Zoom [{pos}→{pos+1}]"
         return Panel(lines, title=title, border_style="#c8a848")
@@ -342,15 +454,29 @@ def _render_overlap_bar(width: int, zoom_sec: float,
     return text
 
 
-def _resample(data: list[float], width: int) -> list[float]:
-    """Resample data to target width using max pooling."""
-    n = len(data)
-    if n == 0 or width == 0:
-        return []
-    result = []
+def _render_cue_marker(cue_time: float, zoom_start: float, zoom_end: float,
+                       width: int, label: str, color: str) -> Text:
+    """Render a cue point marker on the zoom axis."""
+    text = Text()
+    zoom_dur = zoom_end - zoom_start
+    if zoom_dur <= 0:
+        text.append(" " * width)
+        return text
+
+    col = int((cue_time - zoom_start) / zoom_dur * width)
+    col = max(0, min(col, width - 1))
+
+    # Place marker at col position
     for i in range(width):
-        src_start = int(i * n / width)
-        src_end = max(src_start + 1, int((i + 1) * n / width))
-        chunk = data[src_start:src_end]
-        result.append(max(chunk) if chunk else 0.0)
-    return result
+        if i == col:
+            text.append(label[0], style=f"bold {color}")
+        else:
+            text.append(" ")
+
+    # Add time label after marker
+    m, s = divmod(int(cue_time), 60)
+    ms = int((cue_time % 1) * 10)
+    text.append(f" {m}:{s:02d}.{ms}", style=f"dim {color}")
+    return text
+
+

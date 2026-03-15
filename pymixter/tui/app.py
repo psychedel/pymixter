@@ -93,6 +93,10 @@ class MixApp(App):
         Binding("l", "open_recent", "Recent", show=False),
         Binding("u", "undo", "Undo", show=False),
         Binding("ctrl+r", "redo", "Redo", show=False),
+        Binding("d", "remove_from_timeline", "Remove", show=False),
+        Binding("t", "cycle_transition", "Transition", show=False),
+        Binding("n", "suggest_next", "Next", show=False),
+        Binding("e", "analyze_selected", "Analyze", show=False),
         Binding("1", "tab_timeline", "Timeline", show=False),
         Binding("2", "tab_zoom", "Zoom", show=False),
     ]
@@ -342,6 +346,19 @@ class MixApp(App):
         """Handle click on a track in the timeline view."""
         self._select_track(event.library_idx)
 
+    def on_transition_zoom_cue_changed(self, event: TransitionZoom.CueChanged):
+        """Handle cue point edits from the zoom view."""
+        self._checkpoint("Edit cue point")
+        track = self.project.library[event.track_idx]
+        if event.cue_in is not None:
+            track.cue_in = event.cue_in
+        if event.cue_out is not None:
+            track.cue_out = event.cue_out
+        self._save_and_sync()
+        ci = f"in={event.cue_in:.1f}" if event.cue_in is not None else ""
+        co = f"out={event.cue_out:.1f}" if event.cue_out is not None else ""
+        self._set_status(f"Cue {ci}{co} — {track.title}")
+
     # ── Command console (:) ─────────────────────────────────────
 
     def action_open_console(self):
@@ -457,7 +474,8 @@ class MixApp(App):
             return
         track = self.project.library[idx]
         try:
-            self.player.play(track.path)
+            self.player.load(track.path, replay_gain_db=track.replay_gain)
+            self.player.play()
             self._selected_track_idx = idx
             self.query_one("#track-info", TrackInfo).show_track(track)
             self._set_status(f">> {track.title}")
@@ -1125,6 +1143,50 @@ class MixApp(App):
         self.project.append_to_timeline(self._selected_track_idx)
         self._save_and_sync()
         self._set_status(f"Added track [{self._selected_track_idx}] to timeline")
+
+    def action_remove_from_timeline(self):
+        """Remove last track from timeline (d)."""
+        if not self.project.timeline:
+            self._set_status("Timeline is empty")
+            return
+        pos = len(self.project.timeline) - 1
+        track = self.project.library[self.project.timeline[pos]]
+        self._checkpoint("Remove from timeline")
+        self.project.remove_from_timeline(pos)
+        self._save_and_sync()
+        self._set_status(f"Removed [{pos}] {track.title} from timeline")
+
+    _TRANSITION_TYPES = ["crossfade", "eq_fade", "filter_sweep", "echo_out", "cut"]
+
+    def action_cycle_transition(self):
+        """Cycle transition type for last transition (t)."""
+        if len(self.project.timeline) < 2:
+            self._set_status("Need ≥2 tracks in timeline")
+            return
+        pos = len(self.project.timeline) - 2
+        tr = self.project.get_transition(pos)
+        if tr:
+            idx = self._TRANSITION_TYPES.index(tr.type) if tr.type in self._TRANSITION_TYPES else -1
+            new_type = self._TRANSITION_TYPES[(idx + 1) % len(self._TRANSITION_TYPES)]
+            self._checkpoint("Cycle transition type")
+            tr.type = new_type
+        else:
+            new_type = "crossfade"
+            self._checkpoint("Set transition")
+            self.project.set_transition(pos, new_type, 16)
+        self._save_and_sync()
+        self._set_status(f"Transition [{pos}]: {new_type}")
+
+    def action_suggest_next(self):
+        """Show next track suggestion (n)."""
+        self._show_suggestions()
+
+    def action_analyze_selected(self):
+        """Analyze selected track (e)."""
+        if self._selected_track_idx is not None:
+            self._analyze_track(self._selected_track_idx)
+        else:
+            self._set_status("Select a track first")
 
     def action_reload_project(self):
         self._load_project()
