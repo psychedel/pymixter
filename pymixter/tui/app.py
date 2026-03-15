@@ -10,6 +10,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.events import MouseMove
 from textual.theme import Theme
+from textual.containers import Horizontal
 from textual.widgets import Header, Footer, Static, TabbedContent, TabPane
 from textual.timer import Timer
 from textual.worker import Worker, WorkerState
@@ -63,12 +64,14 @@ class MixApp(App):
     ansi_color = True
     CSS = """
     Screen { background: transparent; }
+    #top-pane { height: 1fr; background: transparent; }
+    #library { background: transparent; width: 3fr; height: 1fr; }
+    #track-info { background: transparent; width: 2fr; height: 1fr; overflow-y: auto; }
+    #bottom-tabs { background: transparent; height: 1fr; }
     TabbedContent { background: transparent; height: 1fr; }
     TabPane { background: transparent; padding: 0; }
     ContentSwitcher { background: transparent; }
-    #library { background: transparent; height: 1fr; }
     #timeline { background: transparent; height: 1fr; }
-    #track-info { background: transparent; height: 1fr; }
     #transition-zoom { background: transparent; height: 1fr; }
     Header { background: $primary-background; }
     Footer { background: $primary-background; }
@@ -77,8 +80,8 @@ class MixApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("a", "add_to_timeline", "Add"),
-        Binding("colon", "open_console", ":", key_display=":"),
-        Binding("slash", "fuzzy_search", "/", key_display="/"),
+        Binding("colon", "open_console", "Console", key_display=":"),
+        Binding("slash", "fuzzy_search", "Search", key_display="/"),
         Binding("o", "open_file_browser", "Open"),
         Binding("space", "toggle_play", "Play", key_display="SPC", priority=True),
         Binding("p", "toggle_play", "Play", show=False, priority=True),
@@ -90,10 +93,8 @@ class MixApp(App):
         Binding("l", "open_recent", "Recent", show=False),
         Binding("u", "undo", "Undo", show=False),
         Binding("ctrl+r", "redo", "Redo", show=False),
-        Binding("1", "tab_library", "Library", show=False),
-        Binding("2", "tab_timeline", "Timeline", show=False),
-        Binding("3", "tab_info", "Info", show=False),
-        Binding("4", "tab_zoom", "Zoom", show=False),
+        Binding("1", "tab_timeline", "Timeline", show=False),
+        Binding("2", "tab_zoom", "Zoom", show=False),
     ]
 
     def __init__(self, project_path: str = "project.json"):
@@ -133,14 +134,13 @@ class MixApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with TabbedContent():
-            with TabPane("Library [1]", id="tab-library"):
-                yield LibraryTable(id="library")
-            with TabPane("Timeline [2]", id="tab-timeline"):
+        with Horizontal(id="top-pane"):
+            yield LibraryTable(id="library")
+            yield TrackInfo(id="track-info")
+        with TabbedContent(id="bottom-tabs"):
+            with TabPane("Timeline [1]", id="tab-timeline"):
                 yield TimelineView(self.project, id="timeline")
-            with TabPane("Track [3]", id="tab-info"):
-                yield TrackInfo(id="track-info")
-            with TabPane("Zoom [4]", id="tab-zoom"):
+            with TabPane("Zoom [2]", id="tab-zoom"):
                 yield TransitionZoom(id="transition-zoom")
         yield Footer()
 
@@ -224,7 +224,7 @@ class MixApp(App):
                     for f in files:
                         self.project.import_track(f)
                     self._save_and_sync()
-                    self._switch_tab("tab-library")
+                    self.query_one("#library", LibraryTable).focus()
                     self._set_status(f"Imported {len(files)} tracks from {directory}")
         elif worker.name == "stems":
             if worker.error:
@@ -274,7 +274,7 @@ class MixApp(App):
         self.sub_title = msg
 
     def _switch_tab(self, tab_id: str):
-        self.query_one(TabbedContent).active = tab_id
+        self.query_one("#bottom-tabs", TabbedContent).active = tab_id
 
     # ── Playback ─────────────────────────────────────────────
 
@@ -341,7 +341,6 @@ class MixApp(App):
     def on_timeline_view_track_clicked(self, event: TimelineView.TrackClicked):
         """Handle click on a track in the timeline view."""
         self._select_track(event.library_idx)
-        self._switch_tab("tab-info")
 
     # ── Command console (:) ─────────────────────────────────────
 
@@ -473,7 +472,7 @@ class MixApp(App):
             track = self.project.import_track(path)
             self._save_and_sync()
             self._set_status(f"Imported: {track.title}")
-            self._switch_tab("tab-library")
+            self.query_one("#library", LibraryTable).focus()
         except FileNotFoundError:
             self._set_status(f"File not found: {path}")
         except Exception as e:
@@ -561,7 +560,7 @@ class MixApp(App):
         if idx is None:
             return
         self._select_track(idx)
-        self._switch_tab("tab-library")
+        self.query_one("#library", LibraryTable).focus()
         self.query_one("#library", LibraryTable).move_cursor(row=idx)
 
     # ── Recent projects (l) ────────────────────────────────────
@@ -1157,14 +1156,8 @@ class MixApp(App):
         else:
             self._set_status("Nothing to redo")
 
-    def action_tab_library(self):
-        self._switch_tab("tab-library")
-
     def action_tab_timeline(self):
         self._switch_tab("tab-timeline")
-
-    def action_tab_info(self):
-        self._switch_tab("tab-info")
 
     def action_tab_zoom(self):
         self._switch_tab("tab-zoom")

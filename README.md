@@ -55,7 +55,7 @@ uv run python main.py web --host 0.0.0.0      # expose to network
 | `/` | Fuzzy search library |
 | `:` | Command console |
 | `l` | Open recent project |
-| `1` `2` `3` `4` | Switch tabs (Library, Timeline, Track Info, Zoom) |
+| `1` `2` | Switch bottom tabs (Timeline, Zoom) |
 | `u` / `Ctrl+r` | Undo / redo |
 | `s` | Save project |
 | `r` | Reload project |

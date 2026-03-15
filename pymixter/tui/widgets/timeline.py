@@ -114,6 +114,7 @@ class TimelineView(Static):
                     "eq_fade": "≋≋",
                     "cut": "┃┃",
                     "echo_out": "»»",
+                    "filter_sweep": "∿∿",
                 }.get(tr.type, "??")
                 label = f"{sym}{tr.length_bars}b"
                 # Position at the end of the block (transition zone)

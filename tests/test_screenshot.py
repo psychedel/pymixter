@@ -21,6 +21,7 @@ def demo_project():
     proj.add_track("/music/Stephan Bodzin - Powers of Ten.flac", bpm=126.0, key="Dm", duration=510.0)
     proj.append_to_timeline(0)
     proj.append_to_timeline(1)
+    proj.add_transition(0, 1, type="eq_fade", length_bars=32)
     proj.save(path)
     yield path
     Path(path).unlink(missing_ok=True)
@@ -29,15 +30,31 @@ def demo_project():
 @pytest.mark.asyncio
 async def test_take_screenshot(demo_project):
     app = MixApp(project_path=demo_project)
-    async with app.run_test(size=(56, 30)) as pilot:
-        # Select first track to populate Track Info
+    async with app.run_test(size=(80, 40)) as pilot:
+        # Select first track to populate Track Info (Library + Track Info are side by side)
         await pilot.press("enter")
-        # Take SVG screenshots of each tab
-        for tab, name in [("tab-library", "library"), ("tab-timeline", "timeline"), ("tab-info", "info")]:
-            app.query_one("TabbedContent").active = tab
-            await pilot.pause()
-            svg = app.export_screenshot()
-            out = Path(f"/home/user/mix/screenshot_{name}.svg")
-            out.write_text(svg)
-            print(f"\nScreenshot saved to {out}")
+        await pilot.pause()
+
+        # Screenshot 1: Main view (Library + Track Info side by side, Timeline below)
+        svg = app.export_screenshot()
+        out = Path("/home/user/mix/screenshot_main.svg")
+        out.write_text(svg)
+        print(f"\nScreenshot saved to {out}")
+
+        # Screenshot 2: Switch to timeline tab
+        app.query_one("#bottom-tabs").active = "tab-timeline"
+        await pilot.pause()
+        svg = app.export_screenshot()
+        out = Path("/home/user/mix/screenshot_timeline.svg")
+        out.write_text(svg)
+        print(f"\nScreenshot saved to {out}")
+
+        # Screenshot 3: Switch to zoom tab
+        app.query_one("#bottom-tabs").active = "tab-zoom"
+        await pilot.pause()
+        svg = app.export_screenshot()
+        out = Path("/home/user/mix/screenshot_zoom.svg")
+        out.write_text(svg)
+        print(f"\nScreenshot saved to {out}")
+
         assert len(svg) > 100

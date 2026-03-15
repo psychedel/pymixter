@@ -105,6 +105,9 @@ class TrackInfo(Static):
             blocks = "".join(_energy_char(e) for e in t.energy)
             lines.append(blocks, style="#c8a848")
             lines.append("\n")
+        else:
+            lines.append("\n  Run :analyze for waveform, energy, and details\n",
+                         style="dim italic")
 
         # ── Analysis metrics ──
         has_metrics = any([t.lufs, t.replay_gain, t.danceability, t.dynamic_complexity])
