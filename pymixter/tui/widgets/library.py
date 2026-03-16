@@ -48,6 +48,11 @@ class LibraryTable(DataTable):
         analyzing: set[int] | None = None,
     ):
         """Refresh library table. If reference_idx given, color by compatibility."""
+        # Remember cursor position before rebuild
+        try:
+            prev_row = self.cursor_row
+        except Exception:
+            prev_row = 0
         self.clear()
         _busy = analyzing or set()
 
@@ -100,6 +105,10 @@ class LibraryTable(DataTable):
                 title_cell = Text(t.title)
 
             self.add_row(title_cell, bpm_cell, key_cell, dur, energy_cell, key=str(i))
+
+        # Restore cursor position
+        if prev_row < len(project.library):
+            self.move_cursor(row=prev_row)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted):
         try:

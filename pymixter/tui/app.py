@@ -361,7 +361,11 @@ class MixApp(App):
         dur = _fmt_time(self.player.duration)
         icon = "||" if self.player.state == PlayerState.PAUSED else ">>"
         pct = int(self.player.progress * 100)
-        status = f"{icon} {pos}/{dur} {pct}%"
+        # Show analyzing count alongside playback if analysis is running
+        analyzing = ""
+        if self._analyzing_indices:
+            analyzing = f" ⟳ analyzing {len(self._analyzing_indices)} track(s)"
+        status = f"{icon} {pos}/{dur} {pct}%{analyzing}"
         if status != self._last_status:
             self._last_status = status
             self._set_status(status)
